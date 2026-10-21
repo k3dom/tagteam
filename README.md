@@ -50,6 +50,9 @@ Without Nix, run `tagteam daemon` as a service of your own.
 
 - **Storage:** accounts live in `$XDG_DATA_HOME/tagteam/accounts.json` (default
   `~/.local/share/tagteam/`), readable only by you.
+- **Usage cache:** the usage last fetched for each account lives in
+  `$XDG_CACHE_HOME/tagteam/usage.json` (default `~/.cache/tagteam/`). When
+  Anthropic rate limits a check, `tagteam list` shows that usage with its age.
 - **Switching:** replaces the login in `~/.claude/.credentials.json` and
   `oauthAccount` in `~/.claude.json`. MCP server tokens and other settings stay.
   `CLAUDE_CONFIG_DIR` is respected.

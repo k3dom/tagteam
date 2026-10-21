@@ -18,6 +18,7 @@ import * as Remove from '#/commands/remove.ts'
 import * as Accounts from '#/services/accounts.ts'
 import * as Anthropic from '#/services/anthropic.ts'
 import * as ClaudeCode from '#/services/claude-code.ts'
+import * as UsageCache from '#/services/usage-cache.ts'
 import PackageJson from '#package.json' with { type: 'json' }
 
 Command.make('tagteam').pipe(
@@ -31,9 +32,12 @@ Command.make('tagteam').pipe(
   ]),
   Command.run({ version: PackageJson.version }),
   Effect.provide(
-    Layer.mergeAll(ClaudeCode.layer, Accounts.layer, Anthropic.layer).pipe(
-      Layer.provideMerge(NodeServices.layer)
-    )
+    Layer.mergeAll(
+      ClaudeCode.layer,
+      Accounts.layer,
+      Anthropic.layer,
+      UsageCache.layer
+    ).pipe(Layer.provideMerge(NodeServices.layer))
   ),
   // Expected failures print only their message, which says what to do next.
   // Defects keep the full cause. `Command.run` marks the errors it printed

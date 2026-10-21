@@ -6,6 +6,7 @@ import type * as Login from '#/domain/login.ts'
 import * as Accounts from '#/services/accounts.ts'
 import * as Anthropic from '#/services/anthropic.ts'
 import * as ClaudeCode from '#/services/claude-code.ts'
+import * as UsageCache from '#/services/usage-cache.ts'
 
 export const start = DateTime.makeUnsafe('2026-10-21T08:00:00Z')
 
@@ -40,6 +41,7 @@ export type Usage =
       readonly resetsAt?: number
     }
   | 'unauthorized'
+  | 'rate-limited'
 
 const Token = Schema.TemplateLiteralParser([
   Schema.String,
@@ -91,10 +93,12 @@ const fakeAnthropic = (usage: Map<string, Usage>, refreshed: Array<string>) =>
         request.headers['authorization']
       )
       const current = usage.get(name) ?? 'unauthorized'
-      if (current === 'unauthorized') {
+      if (current === 'unauthorized' || current === 'rate-limited') {
         return HttpClientResponse.fromWeb(
           request,
-          new Response(null, { status: 401 })
+          new Response(null, {
+            status: current === 'unauthorized' ? 401 : 429,
+          })
         )
       }
       return HttpClientResponse.fromWeb(
@@ -164,6 +168,10 @@ export const make = Effect.fnUntraced(function* (options: {
       ClaudeCode.ClaudeCode.make({ configDir, globalConfig })
     ),
     Layer.effect(Accounts.Accounts, Accounts.Accounts.make(data)),
+    Layer.effect(
+      UsageCache.UsageCache,
+      UsageCache.UsageCache.make(path.join(directory, 'cache'))
+    ),
     Layer.effect(
       Anthropic.Anthropic,
       Anthropic.Anthropic.make(Effect.succeed('test'))

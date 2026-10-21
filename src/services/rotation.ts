@@ -20,6 +20,7 @@ import type * as Usage from '#/domain/usage.ts'
 import * as Accounts from '#/services/accounts.ts'
 import * as Anthropic from '#/services/anthropic.ts'
 import * as ClaudeCode from '#/services/claude-code.ts'
+import * as UsageCache from '#/services/usage-cache.ts'
 
 const isFresh = Effect.fnUntraced(function* (tokens: Login.Tokens) {
   return DateTime.isGreaterThan(
@@ -68,15 +69,17 @@ const tokensOf = Effect.fnUntraced(function* (login: Login.Login) {
 })
 
 /**
- * Fetches the usage of an account. For the account Claude Code is using it
- * returns `None` once the access token has expired, since only Claude Code
- * may refresh it and does so on its next request.
+ * Fetches the usage of an account and records it in the usage cache. For the
+ * account Claude Code is using it returns `None` once the access token has
+ * expired, since only Claude Code may refresh it and does so on its next
+ * request.
  */
 export const usageOf = Effect.fn('Rotation.usageOf')(function* (
   login: Login.Login,
   options: { readonly active: boolean }
 ) {
   const anthropic = yield* Anthropic.Anthropic
+  const cache = yield* UsageCache.UsageCache
   const tokens = options.active
     ? login.credentials.claudeAiOauth
     : yield* tokensOf(login)
@@ -88,7 +91,9 @@ export const usageOf = Effect.fn('Rotation.usageOf')(function* (
   ) {
     return Option.none()
   }
-  return Option.some(yield* anthropic.usage(tokens.accessToken))
+  const usage = yield* anthropic.usage(tokens.accessToken)
+  yield* cache.set(login, usage)
+  return Option.some(usage)
 })
 
 export interface Settings {
@@ -108,7 +113,10 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
     const claude = yield* ClaudeCode.ClaudeCode
     const accounts = yield* Accounts.Accounts
     const services = yield* Effect.context<
-      ClaudeCode.ClaudeCode | Accounts.Accounts | Anthropic.Anthropic
+      | ClaudeCode.ClaudeCode
+      | Accounts.Accounts
+      | Anthropic.Anthropic
+      | UsageCache.UsageCache
     >()
     const checks = yield* Ref.make<Record<string, Check>>({})
     const lastNotice = yield* Ref.make(Option.none<string>())

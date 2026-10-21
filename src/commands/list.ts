@@ -16,6 +16,7 @@ import * as Format from '#/lib/format.ts'
 import * as Accounts from '#/services/accounts.ts'
 import * as ClaudeCode from '#/services/claude-code.ts'
 import * as Rotation from '#/services/rotation.ts'
+import * as UsageCache from '#/services/usage-cache.ts'
 
 export const command = Command.make(
   'list',
@@ -23,6 +24,7 @@ export const command = Command.make(
   Effect.fn('commands.list')(function* () {
     const claude = yield* ClaudeCode.ClaudeCode
     const accounts = yield* Accounts.Accounts
+    const cache = yield* UsageCache.UsageCache
     const live = yield* claude.current()
     const all = yield* accounts.list()
     if (Array.isReadonlyArrayEmpty(all)) {
@@ -38,15 +40,22 @@ export const command = Command.make(
       if (window === null) {
         return []
       }
-      const resets = Option.match(Option.fromNullishOr(window.resetsAt), {
-        onNone: () => '',
-        onSome: (resetsAt) =>
-          `  resets in ${Format.roughly(DateTime.distance(now, resetsAt))}`,
-      })
+      const label = pipe(name, String.padEnd(7))
+      const used = `${label} ${pipe(Format.percent(window.utilization), String.padStart(4))}`
       return [
-        `     ${pipe(name, String.padEnd(7))} ${pipe(Format.percent(window.utilization), String.padStart(4))}${resets}`,
+        Option.match(Option.fromNullishOr(window.resetsAt), {
+          onNone: () => `     ${used}`,
+          onSome: (resetsAt) =>
+            DateTime.isGreaterThan(resetsAt, now)
+              ? `     ${used}  resets in ${Format.roughly(DateTime.distance(now, resetsAt))}`
+              : `     ${label} reset ${Format.roughly(DateTime.distance(resetsAt, now))} ago`,
+        }),
       ]
     }
+    const windows = (usage: Usage.Usage) => [
+      ...describe('5-hour', usage.fiveHour),
+      ...describe('weekly', usage.sevenDay),
+    ]
 
     yield* Effect.forEach(
       all,
@@ -62,16 +71,28 @@ export const command = Command.make(
         const labels = Format.labels(
           Array.appendAll(index === 0 ? ['main'] : [], active ? ['active'] : [])
         )
-        const details = Result.match(usage, {
-          onFailure: (error) => [`     usage unavailable: ${error.message}`],
+        const lastSeen = Effect.fnUntraced(function* (
+          why: string,
+          otherwise: string
+        ) {
+          return Option.match(yield* cache.get(stored), {
+            onNone: () => [`     ${otherwise}`],
+            onSome: (seen) => [
+              ...windows(seen.usage),
+              `     last checked ${Format.roughly(DateTime.distance(seen.checkedAt, now))} ago. ${why}`,
+            ],
+          })
+        })
+        const details = yield* Result.match(usage, {
+          onFailure: (error) =>
+            lastSeen(error.message, `usage unavailable: ${error.message}`),
           onSuccess: Option.match({
-            onNone: () => [
-              '     usage unknown until Claude Code refreshes its token on the next request',
-            ],
-            onSome: (known) => [
-              ...describe('5-hour', known.fiveHour),
-              ...describe('weekly', known.sevenDay),
-            ],
+            onNone: () =>
+              lastSeen(
+                'Claude Code refreshes its token on its next request, and then usage can be checked again.',
+                'usage unknown until Claude Code refreshes its token on the next request'
+              ),
+            onSome: (known) => Effect.succeed(windows(known)),
           }),
         })
         yield* Console.log(
