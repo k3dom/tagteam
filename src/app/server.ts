@@ -9,7 +9,6 @@ import * as Api from '#/api/api.ts'
 import * as AccountsHttp from '#/http/accounts.ts'
 import * as UnixSocket from '#/lib/unix-socket.ts'
 
-/** Serves the API at the Unix socket `socket`. */
 export const layer = (socket: string) =>
   HttpRouter.serve(
     HttpApiBuilder.layer(Api.Api).pipe(Layer.provide(AccountsHttp.layer)),

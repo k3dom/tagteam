@@ -14,7 +14,6 @@ export class DaemonUnreachableError extends Schema.TaggedError<
   }
 }
 
-/** The daemon's API, reached through its Unix socket. */
 export class Client extends Context.Service<Client>()('@tagteam/Client', {
   make: Effect.fnUntraced(function* (socket: string) {
     const agent = yield* NodeHttpClient.makeAgent({ socketPath: socket })
@@ -34,5 +33,7 @@ export class Client extends Context.Service<Client>()('@tagteam/Client', {
 
 export const layer = Layer.effect(
   Client,
-  Effect.flatMap(Api.socket, (socket) => Client.make(socket))
+  Effect.gen(function* () {
+    return yield* Client.make(yield* Api.socket)
+  })
 )

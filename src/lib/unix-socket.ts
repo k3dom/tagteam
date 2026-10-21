@@ -12,30 +12,30 @@ export class SocketInUseError extends Schema.TaggedError<
 }
 
 /**
- * Prepares `path` for a server to listen at: creates its directory, readable
+ * Prepares `socket` for a server to listen at: creates its directory, readable
  * only by its owner, and removes a socket that a crashed server left behind.
- * Fails when a server still answers at `path`.
+ * Fails when a server still answers at it.
  */
-export const claim = Effect.fn('UnixSocket.claim')(function* (path: string) {
+export const claim = Effect.fn('UnixSocket.claim')(function* (socket: string) {
   const fs = yield* FileSystem.FileSystem
-  const { dirname } = yield* Path.Path
+  const path = yield* Path.Path
   yield* fs
-    .makeDirectory(dirname(path), { recursive: true, mode: 0o700 })
+    .makeDirectory(path.dirname(socket), { recursive: true, mode: 0o700 })
     .pipe(Effect.orDie)
-  if (!(yield* fs.exists(path).pipe(Effect.orDie))) {
+  if (!(yield* fs.exists(socket).pipe(Effect.orDie))) {
     return
   }
   const answers = yield* Effect.callback<boolean>((resume) => {
-    const socket = Net.connect({ path })
-    socket.once('connect', () => {
-      socket.destroy()
+    const connection = Net.connect({ path: socket })
+    connection.once('connect', () => {
+      connection.destroy()
       resume(Effect.succeed(true))
     })
-    socket.once('error', () => resume(Effect.succeed(false)))
-    return Effect.sync(() => socket.destroy())
+    connection.once('error', () => resume(Effect.succeed(false)))
+    return Effect.sync(() => connection.destroy())
   })
   if (answers) {
-    return yield* new SocketInUseError({ path })
+    return yield* new SocketInUseError({ path: socket })
   }
-  yield* fs.remove(path).pipe(Effect.orDie)
+  yield* fs.remove(socket).pipe(Effect.orDie)
 })

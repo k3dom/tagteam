@@ -11,10 +11,6 @@ export class Api extends HttpApi.make('tagteam')
     "Manage the accounts of tagteam's daemon, which rotates Claude Code between them"
   ) {}
 
-/**
- * The Unix socket the daemon serves the API at, in `$XDG_RUNTIME_DIR`, or in
- * tagteam's data directory where that isn't set.
- */
 export const socket = Effect.gen(function* () {
   const path = yield* Path.Path
   const runtimeDir = yield* Xdg.runtimeDir

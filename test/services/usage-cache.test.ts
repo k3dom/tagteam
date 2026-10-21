@@ -1,7 +1,7 @@
 import { NodeServices } from '@effect/platform-node'
 import { layer } from '@effect/vitest'
 import { assertSome, deepStrictEqual } from '@effect/vitest/utils'
-import { DateTime, Effect, Option } from 'effect'
+import { Array, DateTime, Effect, Option } from 'effect'
 import { TestClock } from 'effect/testing'
 
 import * as UsageCache from '#/services/usage-cache.ts'
@@ -46,7 +46,7 @@ layer(NodeServices.layer)('UsageCache', (it) => {
           'backup',
         ])
         deepStrictEqual(
-          accounts.map(({ email, active, usage }) => ({
+          Array.map(accounts, ({ email, active, usage }) => ({
             email,
             active,
             fiveHour: Option.map(
@@ -85,20 +85,20 @@ layer(NodeServices.layer)('UsageCache', (it) => {
 
         yield* TestClock.adjust('1 minute')
         box.usage.set('main', 'rate-limited')
-        const [limited] = yield* cache.list()
+        const limited = Array.getUnsafe(yield* cache.list(), 0)
         yield* TestClock.adjust('1 minute')
         yield* cache.list()
 
         deepStrictEqual(box.checked, ['main', 'main'])
         deepStrictEqual(
-          Option.map(limited?.usage.latest ?? Option.none(), (latest) => ({
+          Option.map(limited.usage.latest, (latest) => ({
             fiveHour: latest.usage.fiveHour?.utilization,
             checkedAt: latest.checkedAt,
           })),
           Option.some({ fiveHour: 40, checkedAt: start })
         )
         deepStrictEqual(
-          limited?.usage.failure,
+          limited.usage.failure,
           Option.some({
             message:
               "Couldn't check usage because Anthropic limits how often it can be checked.",
@@ -108,9 +108,9 @@ layer(NodeServices.layer)('UsageCache', (it) => {
 
         yield* TestClock.adjust('1 minute')
         box.usage.set('main', { fiveHour: 50 })
-        const [recovered] = yield* cache.list()
+        const recovered = Array.getUnsafe(yield* cache.list(), 0)
         deepStrictEqual(box.checked, ['main', 'main', 'main'])
-        deepStrictEqual(recovered?.usage.failure, Option.none())
+        deepStrictEqual(recovered.usage.failure, Option.none())
       })
   )
 

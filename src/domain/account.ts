@@ -2,7 +2,6 @@ import { Schema } from 'effect'
 
 import * as Usage from '#/domain/usage.ts'
 
-/** A managed account as the API shows it, without its tokens. */
 export const Account = Schema.Struct({
   email: Schema.String,
   active: Schema.Boolean.annotate({

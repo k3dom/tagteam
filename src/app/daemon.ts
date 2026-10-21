@@ -8,13 +8,6 @@ import * as Accounts from '#/services/accounts.ts'
 import * as Rotation from '#/services/rotation.ts'
 import * as UsageCache from '#/services/usage-cache.ts'
 
-export const services = (settings: Rotation.Settings) =>
-  Rotation.layer(settings).pipe(
-    Layer.provideMerge(UsageCache.layer(settings)),
-    Layer.provideMerge(Accounts.layer),
-    Layer.provideMerge(Layer.mergeAll(ClaudeCode.layer, Anthropic.layer))
-  )
-
 /** Serves the API and rotates Claude Code's accounts until interrupted. */
 export const run = Effect.fn('Daemon.run')(function* (
   settings: Rotation.Settings
@@ -25,7 +18,12 @@ export const run = Effect.fn('Daemon.run')(function* (
     return yield* rotation.run()
   }).pipe(
     Effect.provide(
-      Server.layer(socket).pipe(Layer.provideMerge(services(settings)))
+      Server.layer(socket).pipe(
+        Layer.provideMerge(Rotation.layer(settings)),
+        Layer.provideMerge(UsageCache.layer(settings)),
+        Layer.provideMerge(Accounts.layer),
+        Layer.provideMerge(Layer.mergeAll(ClaudeCode.layer, Anthropic.layer))
+      )
     )
   )
 })
