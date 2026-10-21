@@ -1,4 +1,5 @@
 import {
+  Array,
   Config,
   Context,
   Effect,
@@ -16,6 +17,28 @@ const AccountsJson = Schema.fromJsonString(
   Schema.Struct({ accounts: Schema.Array(ClaudeCode.Login) })
 )
 
+/** The stored login of `login`'s account. */
+export const find = (
+  accounts: ReadonlyArray<ClaudeCode.Login>,
+  login: ClaudeCode.Login
+): Option.Option<ClaudeCode.Login> =>
+  Array.findFirst(accounts, (account) => ClaudeCode.sameAccount(account, login))
+
+/** Replaces the stored login of `login`'s account with `login`. */
+export const replace = (
+  accounts: ReadonlyArray<ClaudeCode.Login>,
+  login: ClaudeCode.Login
+): ReadonlyArray<ClaudeCode.Login> =>
+  Array.map(accounts, (account) =>
+    ClaudeCode.sameAccount(account, login) ? login : account
+  )
+
+export const remove = (
+  accounts: ReadonlyArray<ClaudeCode.Login>,
+  login: ClaudeCode.Login
+): ReadonlyArray<ClaudeCode.Login> =>
+  Array.filter(accounts, (account) => !ClaudeCode.sameAccount(account, login))
+
 /**
  * The managed accounts in priority order. The first one is the main account.
  */
@@ -31,6 +54,18 @@ export class Accounts extends Context.Service<Accounts>()('@tagteam/Accounts', {
       Effect.catchReason('PlatformError', 'NotFound', () => Effect.succeed([])),
       Effect.orDie
     )
+
+    const write = Effect.fnUntraced(function* (
+      accounts: ReadonlyArray<ClaudeCode.Login>
+    ) {
+      const temporary = `${file}.tmp`
+      yield* fs.writeFileString(
+        temporary,
+        JSON.stringify({ accounts }, null, 2),
+        { mode: 0o600 }
+      )
+      yield* fs.rename(temporary, file)
+    }, Effect.orDie)
 
     const list = Effect.fn('Accounts.list')(function* () {
       return yield* read
@@ -51,18 +86,24 @@ export class Accounts extends Context.Service<Accounts>()('@tagteam/Accounts', {
       yield* Lockfile.acquire(path.join(directory, 'accounts.lock'), {
         stale: '60 seconds',
         timeout: '1 minute',
-      })
+      }).pipe(Effect.provideService(FileSystem.FileSystem, fs))
       const [result, accounts] = yield* f(yield* read)
-      const temporary = `${file}.tmp`
-      yield* fs
-        .writeFileString(temporary, JSON.stringify({ accounts }, null, 2), {
-          mode: 0o600,
-        })
-        .pipe(Effect.andThen(fs.rename(temporary, file)), Effect.orDie)
+      yield* write(accounts)
       return result
     }, Effect.scoped)
 
-    return { list, modify }
+    const update = Effect.fn('Accounts.update')(function* (
+      f: (
+        accounts: ReadonlyArray<ClaudeCode.Login>
+      ) => ReadonlyArray<ClaudeCode.Login>
+    ) {
+      return yield* modify((accounts) => {
+        const next = f(accounts)
+        return Effect.succeed([next, next] as const)
+      })
+    })
+
+    return { list, modify, update }
   }),
 }) {}
 

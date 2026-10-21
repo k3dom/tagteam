@@ -3,6 +3,7 @@ import {
   Config,
   Context,
   Effect,
+  Equivalence,
   FileSystem,
   Layer,
   Option,
@@ -46,11 +47,16 @@ export const Login = Schema.Struct({
 export type Login = typeof Login.Type
 
 /**
- * Identifies an account. One person can sign in with the same account to
- * several organizations, each with its own limits.
+ * Identifies the account of a login. One person can sign in with the same
+ * account to several organizations, each with its own limits.
  */
 export const id = (login: Login): string =>
   `${login.oauthAccount.accountUuid}/${login.oauthAccount.organizationUuid ?? ''}`
+
+export const sameAccount: Equivalence.Equivalence<Login> = Equivalence.mapInput(
+  Equivalence.String,
+  id
+)
 
 export const email = (login: Login): string => login.oauthAccount.emailAddress
 
@@ -131,12 +137,15 @@ export class ClaudeCode extends Context.Service<ClaudeCode>()(
       })
 
       /**
-       * Makes `login` the one Claude Code uses and returns the login it
-       * replaced, read under the same locks so that it includes any token
-       * refresh Claude Code made in the meantime.
+       * Makes `login` the one Claude Code uses, provided Claude Code is still
+       * logged into the account of `replacing`. Returns the replaced login,
+       * read under the same locks so that it includes any token refresh Claude
+       * Code made in the meantime, or `None` when the login changed and nothing
+       * was switched.
        */
       const activate = Effect.fn('ClaudeCode.activate')(function* (
-        login: Login
+        login: Login,
+        replacing: Login
       ) {
         const timeout = '10 seconds'
         const realConfigDir = yield* fs
@@ -146,18 +155,22 @@ export class ClaudeCode extends Context.Service<ClaudeCode>()(
         yield* Lockfile.acquire(
           path.join(paths.configDir, '.oauth_refresh.lock'),
           { stale: '60 seconds', timeout }
-        )
+        ).pipe(Effect.provideService(FileSystem.FileSystem, fs))
         yield* Lockfile.acquire(`${realConfigDir}.lock`, {
           stale: '60 seconds',
           timeout,
-        })
+        }).pipe(Effect.provideService(FileSystem.FileSystem, fs))
         yield* Lockfile.acquire(`${paths.globalConfig}.lock`, {
           stale: '10 seconds',
           timeout,
-        })
+        }).pipe(Effect.provideService(FileSystem.FileSystem, fs))
 
         const credentials = yield* read(credentialsPath)
         const config = yield* read(paths.globalConfig)
+        const replaced = toLogin(credentials, config)
+        if (!Option.exists(replaced, (live) => sameAccount(live, replacing))) {
+          return Option.none()
+        }
         yield* write(
           credentialsPath,
           JSON.stringify({
@@ -181,7 +194,7 @@ export class ClaudeCode extends Context.Service<ClaudeCode>()(
             2
           )
         )
-        return toLogin(credentials, config)
+        return replaced
       }, Effect.scoped)
 
       return { current, activate }

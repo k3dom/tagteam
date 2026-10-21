@@ -1,5 +1,5 @@
 import { NodeServices } from '@effect/platform-node'
-import { assert, describe, it } from '@effect/vitest'
+import { assert, layer } from '@effect/vitest'
 import { assertFailure } from '@effect/vitest/utils'
 import { DateTime, Effect, Fiber, FileSystem, Path } from 'effect'
 
@@ -11,25 +11,23 @@ const lockPath = Effect.gen(function* () {
   return path.join(yield* fs.makeTempDirectoryScoped(), 'thing.lock')
 })
 
-describe('Lockfile', () => {
-  it.live('holds the lock until the scope closes', () =>
+layer(NodeServices.layer, { excludeTestServices: true })('Lockfile', (it) => {
+  it.effect('holds the lock until the scope closes', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
       const lock = yield* lockPath
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* Lockfile.acquire(lock, {
-            stale: '10 seconds',
-            timeout: '1 second',
-          })
-          assert.isTrue(yield* fs.exists(lock))
+      yield* Effect.gen(function* () {
+        yield* Lockfile.acquire(lock, {
+          stale: '10 seconds',
+          timeout: '1 second',
         })
-      )
+        assert.isTrue(yield* fs.exists(lock))
+      }).pipe(Effect.scoped)
       assert.isFalse(yield* fs.exists(lock))
-    }).pipe(Effect.provide(NodeServices.layer))
+    })
   )
 
-  it.live('waits for another holder to release the lock', () =>
+  it.effect('waits for another holder to release the lock', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
       const lock = yield* lockPath
@@ -43,10 +41,32 @@ describe('Lockfile', () => {
       assert.isUndefined(waiter.pollUnsafe())
       yield* fs.remove(lock, { recursive: true })
       assert.strictEqual(yield* Fiber.join(waiter), 'acquired')
-    }).pipe(Effect.provide(NodeServices.layer))
+    })
   )
 
-  it.live('takes over a lock its holder stopped touching', () =>
+  it.effect('stops waiting when interrupted', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem
+      const lock = yield* lockPath
+      yield* fs.makeDirectory(lock)
+      const waiter = yield* Lockfile.acquire(lock, {
+        stale: '60 seconds',
+        timeout: '1 minute',
+      }).pipe(Effect.scoped, Effect.forkChild)
+
+      yield* Effect.sleep('300 millis')
+      yield* Fiber.interrupt(waiter).pipe(
+        Effect.timeoutOrElse({
+          duration: '1 second',
+          orElse: () =>
+            Effect.die('the wait for the lock ignored the interrupt'),
+        })
+      )
+      assert.isTrue(yield* fs.exists(lock))
+    })
+  )
+
+  it.effect('takes over a lock its holder stopped touching', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
       const lock = yield* lockPath
@@ -56,13 +76,14 @@ describe('Lockfile', () => {
       )
       yield* fs.utimes(lock, longAgo, longAgo)
 
-      yield* Effect.scoped(
-        Lockfile.acquire(lock, { stale: '60 seconds', timeout: '1 second' })
-      )
-    }).pipe(Effect.provide(NodeServices.layer))
+      yield* Lockfile.acquire(lock, {
+        stale: '60 seconds',
+        timeout: '1 second',
+      }).pipe(Effect.scoped)
+    })
   )
 
-  it.live('gives up when the holder keeps the lock', () =>
+  it.effect('gives up when the holder keeps the lock', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem
       const lock = yield* lockPath
@@ -75,6 +96,6 @@ describe('Lockfile', () => {
 
       assertFailure(result, new Lockfile.LockTimeoutError({ path: lock }))
       assert.isTrue(yield* fs.exists(lock))
-    }).pipe(Effect.provide(NodeServices.layer))
+    })
   )
 })

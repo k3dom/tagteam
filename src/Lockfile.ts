@@ -1,11 +1,10 @@
 import {
-  Clock,
   DateTime,
   Duration,
   Effect,
   FileSystem,
   Option,
-  Random,
+  Ref,
   Schedule,
   Schema,
 } from 'effect'
@@ -25,47 +24,55 @@ export class LockTimeoutError extends Schema.TaggedError<
  * touches its mtime so others only treat it as stale once the holder is gone.
  * The lock is released when the scope closes.
  */
-export const acquire = Effect.fnUntraced(function* (
+export const acquire = Effect.fn('Lockfile.acquire')(function* (
   path: string,
   options: { readonly stale: Duration.Input; readonly timeout: Duration.Input }
 ) {
   const fs = yield* FileSystem.FileSystem
-  const stale = Duration.toMillis(options.stale)
-  const deadline =
-    (yield* Clock.currentTimeMillis) + Duration.toMillis(options.timeout)
+  const held = yield* Ref.make(false)
+  yield* Effect.addFinalizer(
+    Effect.fnUntraced(function* () {
+      if (yield* Ref.get(held)) {
+        yield* fs.remove(path, { recursive: true }).pipe(Effect.ignore)
+      }
+    })
+  )
 
   const removeIfStale = Effect.gen(function* () {
     const info = yield* fs.stat(path)
-    const now = yield* Clock.currentTimeMillis
-    const stamped = Option.match(info.mtime, {
-      onNone: () => 0,
-      onSome: (mtime) => mtime.getTime(),
+    const touched = Option.match(info.mtime, {
+      onNone: () => DateTime.makeUnsafe(0),
+      onSome: DateTime.fromDateUnsafe,
     })
-    if (now - stamped > stale) {
+    const age = DateTime.distance(touched, yield* DateTime.now)
+    if (Duration.isGreaterThan(age, Duration.fromInputUnsafe(options.stale))) {
       yield* fs.remove(path, { recursive: true })
     }
   }).pipe(Effect.catchReason('PlatformError', 'NotFound', () => Effect.void))
 
-  const tryTake = fs.makeDirectory(path).pipe(
-    Effect.as(true),
+  // Uninterruptible, so a lock it takes is always marked for release.
+  const tryTake = Effect.gen(function* () {
+    yield* fs.makeDirectory(path)
+    yield* Ref.set(held, true)
+    return true
+  }).pipe(
     Effect.catchReason('PlatformError', 'AlreadyExists', () =>
-      Effect.as(removeIfStale, false)
-    )
+      removeIfStale.pipe(Effect.as(false))
+    ),
+    Effect.uninterruptible
   )
 
-  yield* Effect.acquireRelease(
-    Effect.gen(function* () {
-      while (!(yield* tryTake)) {
-        if ((yield* Clock.currentTimeMillis) > deadline) {
-          return yield* new LockTimeoutError({ path })
-        }
-        yield* Effect.sleep(
-          Duration.millis(yield* Random.nextBetween(250, 500))
-        )
-      }
+  yield* tryTake.pipe(
+    Effect.repeat({
+      until: (taken: boolean) => taken,
+      schedule: Schedule.spaced('250 millis').pipe(Schedule.jittered),
     }),
-    () => fs.remove(path, { recursive: true }).pipe(Effect.ignore)
-  ).pipe(Effect.catchTag('PlatformError', Effect.die))
+    Effect.timeoutOrElse({
+      duration: options.timeout,
+      orElse: () => Effect.fail(new LockTimeoutError({ path })),
+    }),
+    Effect.catchTag('PlatformError', Effect.die)
+  )
 
   yield* Effect.gen(function* () {
     const now = DateTime.toDate(yield* DateTime.now)

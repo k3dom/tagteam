@@ -6,10 +6,13 @@ import {
   Duration,
   Effect,
   Layer,
+  Match,
   Number,
   Option,
   pipe,
+  Result,
   Schema,
+  String,
 } from 'effect'
 import { Argument, Command, Flag } from 'effect/cli'
 
@@ -57,15 +60,6 @@ const find = (
     Effect.mapError(() => new AccountNotFoundError({ account }))
   )
 
-const without = (
-  accounts: ReadonlyArray<ClaudeCode.Login>,
-  login: ClaudeCode.Login
-) =>
-  Array.filter(
-    accounts,
-    (other) => ClaudeCode.id(other) !== ClaudeCode.id(login)
-  )
-
 const add = Command.make(
   'add',
   {
@@ -82,34 +76,28 @@ const add = Command.make(
       return yield* new NotLoggedInError()
     }
     const login = live.value
-    const position = yield* accounts.modify((all) => {
-      const known = Array.some(
-        all,
-        (other) => ClaudeCode.id(other) === ClaudeCode.id(login)
+    const known = Option.isSome(Accounts.find(yield* accounts.list(), login))
+    const next = yield* accounts.update((all) =>
+      Match.value({
+        main,
+        known: Option.isSome(Accounts.find(all, login)),
+      }).pipe(
+        Match.when({ main: true }, () =>
+          Array.prepend(Accounts.remove(all, login), login)
+        ),
+        Match.when({ known: true }, () => Accounts.replace(all, login)),
+        Match.orElse(() => Array.append(all, login))
       )
-      const next = main
-        ? Array.prepend(without(all, login), login)
-        : known
-          ? Array.map(all, (other) =>
-              ClaudeCode.id(other) === ClaudeCode.id(login) ? login : other
-            )
-          : Array.append(all, login)
-      return Effect.succeed([
-        {
-          known,
-          index: Array.findFirstIndex(
-            next,
-            (other) => ClaudeCode.id(other) === ClaudeCode.id(login)
-          ),
-        },
-        next,
-      ] as const)
-    })
+    )
+    const position = Array.findFirstIndex(next, (account) =>
+      ClaudeCode.sameAccount(account, login)
+    )
     yield* Console.log(
-      `${position.known ? 'Updated' : 'Added'} ${ClaudeCode.email(login)} as account ${Option.getOrElse(position.index, () => 0) + 1}${Option.contains(position.index, 0) ? ', the main account' : ''}.`
+      `${known ? 'Updated' : 'Added'} ${ClaudeCode.email(login)} as account ${Option.getOrElse(position, () => 0) + 1}${Option.contains(position, 0) ? ', the main account' : ''}.`
     )
   })
 ).pipe(
+  Command.withShortDescription('Add the account Claude Code is logged into'),
   Command.withDescription(
     'Add the account Claude Code is logged into, or update its stored login. To add another account, log in to it with /login in Claude Code and run this again.'
   )
@@ -123,7 +111,7 @@ const remove = Command.make(
     const removed = yield* accounts.modify(
       Effect.fnUntraced(function* (all) {
         const login = yield* find(all, account)
-        return [login, without(all, login)] as const
+        return [login, Accounts.remove(all, login)] as const
       })
     )
     yield* Console.log(
@@ -140,7 +128,10 @@ const main = Command.make(
     const login = yield* accounts.modify(
       Effect.fnUntraced(function* (all) {
         const chosen = yield* find(all, account)
-        return [chosen, Array.prepend(without(all, chosen), chosen)] as const
+        return [
+          chosen,
+          Array.prepend(Accounts.remove(all, chosen), chosen),
+        ] as const
       })
     )
     yield* Console.log(`${ClaudeCode.email(login)} is now the main account.`)
@@ -165,58 +156,66 @@ const list = Command.make(
       )
     }
     const now = yield* DateTime.now
-    const describe = (name: string, window: Anthropic.Window | null) =>
-      window === null
-        ? []
-        : [
-            `     ${name.padEnd(7)} ${`${Math.round(window.utilization)}%`.padStart(4)}${
-              window.resetsAt === null
-                ? ''
-                : `  resets in ${Duration.format(
-                    Duration.minutes(
-                      Math.max(
-                        1,
-                        Math.floor(
-                          Duration.toMinutes(
-                            DateTime.distance(now, window.resetsAt)
-                          )
-                        )
-                      )
-                    )
-                  )}`
-            }`,
-          ]
+    const describe = (
+      name: string,
+      window: Anthropic.Window | null
+    ): ReadonlyArray<string> => {
+      if (window === null) {
+        return []
+      }
+      const used = pipe(
+        `${Number.round(window.utilization, 0)}%`,
+        String.padStart(4)
+      )
+      const resets = Option.match(Option.fromNullishOr(window.resetsAt), {
+        onNone: () => '',
+        onSome: (resetsAt) =>
+          `  resets in ${pipe(
+            Duration.toMinutes(DateTime.distance(now, resetsAt)),
+            Number.round(0),
+            Number.max(1),
+            Duration.minutes,
+            Duration.format
+          )}`,
+      })
+      return [`     ${pipe(name, String.padEnd(7))} ${used}${resets}`]
+    }
 
-    yield* Effect.forEach(all, (stored, index) =>
-      Effect.gen(function* () {
-        const active = Option.exists(
-          live,
-          (login) => ClaudeCode.id(login) === ClaudeCode.id(stored)
+    yield* Effect.forEach(
+      all,
+      Effect.fnUntraced(function* (stored, index) {
+        const current = Option.filter(live, (login) =>
+          ClaudeCode.sameAccount(login, stored)
         )
+        const active = Option.isSome(current)
         const usage = yield* Rotation.usageOf(
-          active ? Option.getOrElse(live, () => stored) : stored,
+          Option.getOrElse(current, () => stored),
           { active }
         ).pipe(Effect.result)
-        const tags = [
-          ...(index === 0 ? ['main'] : []),
-          ...(active ? ['active'] : []),
-        ]
-        yield* Console.log(
-          [
-            `${active ? '*' : ' '} ${index + 1}. ${ClaudeCode.email(stored)}${tags.length > 0 ? ` (${tags.join(', ')})` : ''}`,
-            ...(usage._tag === 'Failure'
-              ? [`     usage unavailable: ${usage.failure.message}`]
-              : Option.match(usage.success, {
-                  onNone: () => [
-                    '     usage unknown until Claude Code refreshes its token on the next request',
-                  ],
-                  onSome: (current) => [
-                    ...describe('5-hour', current.fiveHour),
-                    ...describe('weekly', current.sevenDay),
-                  ],
-                })),
-          ].join('\n')
+        const tags = Array.appendAll(
+          index === 0 ? ['main'] : [],
+          active ? ['active'] : []
         )
+        const heading = `${active ? '*' : ' '} ${index + 1}. ${ClaudeCode.email(stored)}${Array.match(
+          tags,
+          {
+            onEmpty: () => '',
+            onNonEmpty: (some) => ` (${Array.join(some, ', ')})`,
+          }
+        )}`
+        const details = Result.match(usage, {
+          onFailure: (error) => [`     usage unavailable: ${error.message}`],
+          onSuccess: Option.match({
+            onNone: () => [
+              '     usage unknown until Claude Code refreshes its token on the next request',
+            ],
+            onSome: (known) => [
+              ...describe('5-hour', known.fiveHour),
+              ...describe('weekly', known.sevenDay),
+            ],
+          }),
+        })
+        yield* Console.log(Array.join([heading, ...details], '\n'))
       })
     )
   })
@@ -249,33 +248,39 @@ const daemon = Command.make(
       Flag.withDefault(60)
     ),
   },
-  ({ threshold, interval }) =>
-    Rotation.run({ threshold, interval: Duration.seconds(interval) })
+  Effect.fnUntraced(function* ({ threshold, interval }) {
+    const rotation = yield* Rotation.Rotation.make({
+      threshold,
+      interval: Duration.seconds(interval),
+    })
+    return yield* rotation.run()
+  })
 ).pipe(
   Command.withDescription(
     'Watch the usage of every account and switch Claude Code to the first one in priority order that is under its limits'
   )
 )
 
-const report = (error: Error) =>
-  Console.error(error.message).pipe(
-    Effect.andThen(
-      Effect.sync(() => {
-        process.exitCode = 1
-      })
-    )
-  )
+const report = Effect.fnUntraced(function* (error: Error) {
+  yield* Console.error(error.message)
+  yield* Effect.sync(() => {
+    process.exitCode = 1
+  })
+})
 
 Command.make('tagteam').pipe(
   Command.withDescription(PackageJson.description),
   Command.withSubcommands([add, remove, main, list, daemon]),
   Command.run({ version: PackageJson.version }),
-  Effect.catchTags({
-    NotLoggedInError: report,
-    AccountNotFoundError: report,
-    ClaudeCodeError: report,
-    LockTimeoutError: report,
-  }),
+  Effect.catchTag(
+    [
+      'NotLoggedInError',
+      'AccountNotFoundError',
+      'ClaudeCodeError',
+      'LockTimeoutError',
+    ],
+    report
+  ),
   Effect.provide(
     Layer.mergeAll(ClaudeCode.layer, Accounts.layer, Anthropic.layer).pipe(
       Layer.provideMerge(NodeServices.layer)
