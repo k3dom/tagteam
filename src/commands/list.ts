@@ -71,26 +71,21 @@ export const command = Command.make(
         const labels = Format.labels(
           Array.appendAll(index === 0 ? ['main'] : [], active ? ['active'] : [])
         )
-        const lastSeen = Effect.fnUntraced(function* (
-          why: string,
-          otherwise: string
-        ) {
+        const lastSeen = Effect.fnUntraced(function* (reason: string) {
           return Option.match(yield* cache.get(stored), {
-            onNone: () => [`     ${otherwise}`],
+            onNone: () => [`     ${reason}`],
             onSome: (seen) => [
               ...windows(seen.usage),
-              `     last checked ${Format.roughly(DateTime.distance(seen.checkedAt, now))} ago. ${why}`,
+              `     Checked ${Format.roughly(DateTime.distance(seen.checkedAt, now))} ago. ${reason}`,
             ],
           })
         })
         const details = yield* Result.match(usage, {
-          onFailure: (error) =>
-            lastSeen(error.message, `usage unavailable: ${error.message}`),
+          onFailure: (error) => lastSeen(error.message),
           onSuccess: Option.match({
             onNone: () =>
               lastSeen(
-                'Claude Code refreshes its token on its next request, and then usage can be checked again.',
-                'usage unknown until Claude Code refreshes its token on the next request'
+                'Usage can be checked again once Claude Code refreshes its token on its next request.'
               ),
             onSome: (known) => Effect.succeed(windows(known)),
           }),

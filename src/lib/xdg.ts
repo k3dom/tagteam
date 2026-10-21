@@ -1,19 +1,21 @@
 import { Config, Effect, Option, Path } from 'effect'
 
-const base = Effect.fnUntraced(function* (
-  variable: string,
-  fallback: ReadonlyArray<string>
-) {
+/** The base directory for user data, `$XDG_DATA_HOME` or `~/.local/share`. */
+export const dataHome = Effect.gen(function* () {
   const path = yield* Path.Path
-  const { home, configured } = yield* Config.all({
+  const { home, dataHome: configured } = yield* Config.all({
     home: Config.String('HOME'),
-    configured: Config.option(Config.String(variable)),
+    dataHome: Config.option(Config.String('XDG_DATA_HOME')),
   })
-  return Option.getOrElse(configured, () => path.join(home, ...fallback))
+  return Option.getOrElse(configured, () => path.join(home, '.local', 'share'))
 })
 
-/** The base directory for user data, `$XDG_DATA_HOME` or `~/.local/share`. */
-export const dataHome = base('XDG_DATA_HOME', ['.local', 'share'])
-
 /** The base directory for user caches, `$XDG_CACHE_HOME` or `~/.cache`. */
-export const cacheHome = base('XDG_CACHE_HOME', ['.cache'])
+export const cacheHome = Effect.gen(function* () {
+  const path = yield* Path.Path
+  const { home, cacheHome: configured } = yield* Config.all({
+    home: Config.String('HOME'),
+    cacheHome: Config.option(Config.String('XDG_CACHE_HOME')),
+  })
+  return Option.getOrElse(configured, () => path.join(home, '.cache'))
+})

@@ -1,7 +1,7 @@
 import { NodeServices } from '@effect/platform-node'
 import { layer } from '@effect/vitest'
 import { deepStrictEqual } from '@effect/vitest/utils'
-import { Effect, Layer } from 'effect'
+import { Effect, FileSystem, Layer, Logger } from 'effect'
 import { Command } from 'effect/cli'
 import { TestClock, TestConsole } from 'effect/testing'
 
@@ -14,7 +14,10 @@ const { at, login, start } = Sandbox
 const list = Effect.gen(function* () {
   yield* Command.runWith(List.command, { version: 'test' })([])
   return yield* TestConsole.logLines
-}).pipe(Effect.provide(Layer.fresh(TestConsole.layer)))
+}).pipe(
+  Effect.provideService(Logger.LogToStderr, true),
+  Effect.provide(Layer.fresh(TestConsole.layer))
+)
 
 layer(NodeServices.layer)('list', (it) => {
   it.effect(
@@ -36,7 +39,7 @@ layer(NodeServices.layer)('list', (it) => {
             '* 1. main@example.com (main, active)',
             '     5-hour   42%  resets in 1h 57m',
             '     weekly   10%  resets in 2d 23h 57m',
-            "     last checked 3m ago. Couldn't check usage because Anthropic limits how often it can be checked.",
+            "     Checked 3m ago. Couldn't check usage because Anthropic limits how often it can be checked.",
           ].join('\n'),
         ])
       })
@@ -60,7 +63,7 @@ layer(NodeServices.layer)('list', (it) => {
             '* 1. main@example.com (main, active)',
             '     5-hour  reset 1h ago',
             '     weekly   10%  resets in 2d 21h',
-            '     last checked 3h ago. Claude Code refreshes its token on its next request, and then usage can be checked again.',
+            '     Checked 3h ago. Usage can be checked again once Claude Code refreshes its token on its next request.',
           ].join('\n'),
         ])
       })
@@ -76,7 +79,26 @@ layer(NodeServices.layer)('list', (it) => {
       deepStrictEqual(yield* list.pipe(Effect.provide(box.layer)), [
         [
           '* 1. main@example.com (main, active)',
-          "     usage unavailable: Couldn't check usage because Anthropic limits how often it can be checked.",
+          "     Couldn't check usage because Anthropic limits how often it can be checked.",
+        ].join('\n'),
+      ])
+    })
+  )
+
+  it.effect("still shows the usage when the cache can't be saved", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(start.epochMilliseconds)
+      const fs = yield* FileSystem.FileSystem
+      const main = login('main')
+      const box = yield* Sandbox.make({ live: main, accounts: [main] })
+      box.usage.set('main', { fiveHour: 42, sevenDay: 10 })
+      yield* fs.writeFileString(box.cache, 'not a directory')
+
+      deepStrictEqual(yield* list.pipe(Effect.provide(box.layer)), [
+        [
+          '* 1. main@example.com (main, active)',
+          '     5-hour   42%  resets in 2h',
+          '     weekly   10%  resets in 3d',
         ].join('\n'),
       ])
     })

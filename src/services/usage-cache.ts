@@ -15,14 +15,14 @@ import * as Usage from '#/domain/usage.ts'
 import * as JsonFile from '#/lib/json-file.ts'
 import * as Xdg from '#/lib/xdg.ts'
 
-const Entry = Schema.Struct({
-  usage: Usage.Usage,
-  checkedAt: Schema.DateTimeUtcFromString,
-})
-type Entry = typeof Entry.Type
-
 const UsageJson = Schema.Struct({
-  accounts: Schema.Record(Schema.String, Entry),
+  accounts: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      usage: Usage.Usage,
+      checkedAt: Schema.DateTimeUtcFromString,
+    })
+  ),
 })
 
 /**
@@ -44,7 +44,8 @@ export class UsageCache extends Context.Service<UsageCache>()(
             onSome: ({ accounts }) => accounts,
           })
         ),
-        Effect.orElseSucceed((): Record<string, Entry> => ({})),
+        Effect.orElseSucceed((): (typeof UsageJson.Type)['accounts'] => ({})),
+        Effect.catchDefect(() => Effect.succeed({})),
         Effect.provideService(FileSystem.FileSystem, fs)
       )
 
@@ -71,6 +72,12 @@ export class UsageCache extends Context.Service<UsageCache>()(
             )
           )
         },
+        Effect.catchDefect((defect) =>
+          Effect.logWarning(
+            `Couldn't save usage to ${file}, so \`tagteam list\` can't show it while Anthropic rate limits usage checks.`,
+            defect
+          )
+        ),
         Effect.provideService(FileSystem.FileSystem, fs)
       )
 

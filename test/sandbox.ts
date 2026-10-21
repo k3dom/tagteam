@@ -93,12 +93,11 @@ const fakeAnthropic = (usage: Map<string, Usage>, refreshed: Array<string>) =>
         request.headers['authorization']
       )
       const current = usage.get(name) ?? 'unauthorized'
-      if (current === 'unauthorized' || current === 'rate-limited') {
+      if (typeof current === 'string') {
+        const status = { unauthorized: 401, 'rate-limited': 429 }[current]
         return HttpClientResponse.fromWeb(
           request,
-          new Response(null, {
-            status: current === 'unauthorized' ? 401 : 429,
-          })
+          new Response(null, { status })
         )
       }
       return HttpClientResponse.fromWeb(
@@ -136,6 +135,7 @@ export const make = Effect.fnUntraced(function* (options: {
   const globalConfig = path.join(directory, '.claude.json')
   const credentials = path.join(configDir, '.credentials.json')
   const data = path.join(directory, 'tagteam')
+  const cache = path.join(directory, 'cache')
 
   /** Simulates Claude Code logging in or refreshing its tokens. */
   const logIn = Effect.fnUntraced(function* (next: Login.Login) {
@@ -168,10 +168,7 @@ export const make = Effect.fnUntraced(function* (options: {
       ClaudeCode.ClaudeCode.make({ configDir, globalConfig })
     ),
     Layer.effect(Accounts.Accounts, Accounts.Accounts.make(data)),
-    Layer.effect(
-      UsageCache.UsageCache,
-      UsageCache.UsageCache.make(path.join(directory, 'cache'))
-    ),
+    Layer.effect(UsageCache.UsageCache, UsageCache.UsageCache.make(cache)),
     Layer.effect(
       Anthropic.Anthropic,
       Anthropic.Anthropic.make(Effect.succeed('test'))
@@ -191,6 +188,8 @@ export const make = Effect.fnUntraced(function* (options: {
   return {
     layer,
     usage,
+    /** The usage cache's directory, which doesn't exist until it is used. */
+    cache,
     /** The refresh tokens sent to Anthropic. */
     refreshed,
     logIn,
