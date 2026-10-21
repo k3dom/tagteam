@@ -1,7 +1,7 @@
 import { Duration, Effect } from 'effect'
 import { Command, Flag } from 'effect/cli'
 
-import * as Rotation from '#/services/rotation.ts'
+import * as Daemon from '#/app/daemon.ts'
 
 export const command = Command.make(
   'daemon',
@@ -27,14 +27,13 @@ export const command = Command.make(
     ),
   },
   Effect.fn('commands.daemon')(function* ({ threshold, interval }) {
-    const rotation = yield* Rotation.Rotation.make({
+    return yield* Daemon.run({
       threshold,
       interval: Duration.seconds(interval),
     })
-    return yield* rotation.run()
   })
 ).pipe(
   Command.withDescription(
-    'Watch the usage of every account and switch Claude Code to the first one in priority order that is under its limits'
+    'Watch the usage of every account, switch Claude Code to the first one in priority order that is under its limits, and serve the other commands'
   )
 )

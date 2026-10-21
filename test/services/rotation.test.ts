@@ -1,7 +1,7 @@
 import { NodeServices } from '@effect/platform-node'
 import { layer } from '@effect/vitest'
-import { assertSome, deepStrictEqual } from '@effect/vitest/utils'
-import { Effect, Option } from 'effect'
+import { deepStrictEqual } from '@effect/vitest/utils'
+import { Effect } from 'effect'
 import { TestClock } from 'effect/testing'
 
 import * as Rotation from '#/services/rotation.ts'
@@ -160,34 +160,6 @@ layer(NodeServices.layer)('Rotation', (it) => {
           main,
           login('backup', { generation: 1 }),
         ])
-      })
-  )
-
-  it.effect(
-    'leaves the refresh to Claude Code once it switched to the account',
-    () =>
-      Effect.gen(function* () {
-        yield* TestClock.setTime(start.epochMilliseconds)
-        const main = login('main')
-        const backup = login('backup', { expiresAt: at({ minutes: 1 }) })
-        const box = yield* Sandbox.make({
-          live: main,
-          accounts: [main, backup],
-        })
-        box.usage.set('backup', { fiveHour: 20 })
-        // Another tagteam process switched Claude Code to the backup account
-        // after this one read it as inactive.
-        yield* box.logIn(backup)
-
-        const usage = yield* Rotation.usageOf(backup, { active: false }).pipe(
-          Effect.provide(box.layer)
-        )
-
-        deepStrictEqual(box.refreshed, [])
-        assertSome(
-          Option.map(usage, ({ fiveHour }) => fiveHour?.utilization),
-          20
-        )
       })
   )
 })

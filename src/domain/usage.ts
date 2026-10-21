@@ -12,3 +12,19 @@ export const Usage = Schema.Struct({
   sevenDay: Schema.NullOr(Window),
 }).pipe(Schema.encodeKeys({ fiveHour: 'five_hour', sevenDay: 'seven_day' }))
 export type Usage = typeof Usage.Type
+
+/**
+ * What the daemon knows of an account's usage: the latest it fetched, and why
+ * its latest check failed if it did. Both are empty for the account Claude
+ * Code is using while its token has expired, since only Claude Code may
+ * refresh that token.
+ */
+export const Check = Schema.Struct({
+  latest: Schema.Option(
+    Schema.Struct({ usage: Usage, checkedAt: Schema.DateTimeUtc })
+  ),
+  failure: Schema.Option(
+    Schema.Struct({ message: Schema.String, retryAt: Schema.DateTimeUtc })
+  ),
+})
+export type Check = typeof Check.Type

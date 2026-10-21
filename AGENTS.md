@@ -5,6 +5,17 @@ one main account, switches to the next account in priority order when the active
 one nears its 5-hour or weekly limit, and returns to the main account once it
 recovers.
 
+The daemon is a server with an HTTP API built with `effect/http-api`, served at
+a Unix socket, and the other commands are clients of it. Only the daemon reads
+and writes state, so state such as the usage cache lives in its memory.
+
+- Server: `domain/` (schemas and the errors the API returns), `api/` (the
+  `HttpApi`), `http/` (handlers, one service call each), `services/`, `lib/`
+  (code that would work in another project) and `app/` (the layers that tie the
+  daemon together).
+- CLI: `cli.ts` (the root command), `main.ts`, `client.ts` (the API client) and
+  `commands/`, which reach the daemon only through the client.
+
 ## Tooling
 
 - Node.js 26 runs the TypeScript sources directly, without a build step.

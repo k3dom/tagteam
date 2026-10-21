@@ -3,7 +3,7 @@ import { layer } from '@effect/vitest'
 import { assertNone, deepStrictEqual } from '@effect/vitest/utils'
 import { Effect } from 'effect'
 
-import * as ClaudeCode from '#/services/claude-code.ts'
+import * as ClaudeCode from '#/lib/claude-code.ts'
 import * as Sandbox from '#test/sandbox.ts'
 
 const { login } = Sandbox

@@ -9,3 +9,9 @@ export const dataHome = Effect.gen(function* () {
   })
   return Option.getOrElse(configured, () => path.join(home, '.local', 'share'))
 })
+
+/**
+ * The base directory for runtime files such as sockets, `$XDG_RUNTIME_DIR`,
+ * which only some sessions set.
+ */
+export const runtimeDir = Config.option(Config.String('XDG_RUNTIME_DIR'))
