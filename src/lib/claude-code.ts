@@ -20,7 +20,7 @@ export class ClaudeCodeError extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()('ClaudeCodeError', { path: Schema.String, cause: Schema.Defect() }) {
   override get message(): string {
-    return `Couldn't read ${this.path} because it isn't valid JSON. Check the file, or log in to Claude Code again to rewrite it.`
+    return `${this.path} isn't valid JSON, so tagteam can't tell which account Claude Code is logged into. Check the file, or log in to Claude Code again to rewrite it.`
   }
 }
 

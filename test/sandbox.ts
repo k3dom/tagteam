@@ -3,9 +3,10 @@ import { DateTime, Effect, FileSystem, Layer, Path, Schema } from 'effect'
 import { HttpClient, HttpClientResponse } from 'effect/http'
 
 import type * as Login from '#/domain/login.ts'
+import * as Anthropic from '#/lib/anthropic.ts'
+import * as ClaudeCode from '#/lib/claude-code.ts'
 import * as Accounts from '#/services/accounts.ts'
-import * as Anthropic from '#/services/anthropic.ts'
-import * as ClaudeCode from '#/services/claude-code.ts'
+import * as UsageCache from '#/services/usage-cache.ts'
 
 export const start = DateTime.makeUnsafe('2026-10-21T08:00:00Z')
 
@@ -40,6 +41,7 @@ export type Usage =
       readonly resetsAt?: number
     }
   | 'unauthorized'
+  | 'rate-limited'
 
 const Token = Schema.TemplateLiteralParser([
   Schema.String,
@@ -66,7 +68,11 @@ const iso = (millis: number) => DateTime.formatIso(DateTime.makeUnsafe(millis))
  * Stands in for Anthropic. Access and refresh tokens look like
  * `<account>:<kind>:<generation>`, and a refresh hands out the next generation.
  */
-const fakeAnthropic = (usage: Map<string, Usage>, refreshed: Array<string>) =>
+const fakeAnthropic = (
+  usage: Map<string, Usage>,
+  refreshed: Array<string>,
+  checked: Array<string>
+) =>
   HttpClient.make((request, url) =>
     Effect.gen(function* () {
       if (url.pathname === '/v1/oauth/token') {
@@ -90,7 +96,14 @@ const fakeAnthropic = (usage: Map<string, Usage>, refreshed: Array<string>) =>
       const [, name] = yield* Schema.decodeUnknownEffect(Authorization)(
         request.headers['authorization']
       )
+      checked.push(name)
       const current = usage.get(name) ?? 'unauthorized'
+      if (current === 'rate-limited') {
+        return HttpClientResponse.fromWeb(
+          request,
+          new Response(null, { status: 429, headers: { 'retry-after': '120' } })
+        )
+      }
       if (current === 'unauthorized') {
         return HttpClientResponse.fromWeb(
           request,
@@ -119,7 +132,8 @@ const JsonObject = Schema.fromJsonString(
 
 /**
  * A Claude Code config directory logged into `live` and a tagteam store
- * holding `accounts`, in a temporary directory, with a fake Anthropic.
+ * holding `accounts`, in a temporary directory, with a fake Anthropic. Its
+ * layer provides the daemon's services but the rotation.
  */
 export const make = Effect.fnUntraced(function* (options: {
   readonly live: Login.Login
@@ -158,21 +172,32 @@ export const make = Effect.fnUntraced(function* (options: {
 
   const usage = new Map<string, Usage>()
   const refreshed: Array<string> = []
-  const layer = Layer.mergeAll(
-    Layer.effect(
-      ClaudeCode.ClaudeCode,
-      ClaudeCode.ClaudeCode.make({ configDir, globalConfig })
+  const checked: Array<string> = []
+  const layer = UsageCache.layer({ interval: '1 minute' }).pipe(
+    Layer.provideMerge(
+      Layer.effect(Accounts.Accounts, Accounts.Accounts.make(data))
     ),
-    Layer.effect(Accounts.Accounts, Accounts.Accounts.make(data)),
-    Layer.effect(
-      Anthropic.Anthropic,
-      Anthropic.Anthropic.make(Effect.succeed('test'))
-    ).pipe(
-      Layer.provide(
-        Layer.succeed(HttpClient.HttpClient, fakeAnthropic(usage, refreshed))
+    Layer.provideMerge(
+      Layer.mergeAll(
+        Layer.effect(
+          ClaudeCode.ClaudeCode,
+          ClaudeCode.ClaudeCode.make({ configDir, globalConfig })
+        ),
+        Layer.effect(
+          Anthropic.Anthropic,
+          Anthropic.Anthropic.make(Effect.succeed('test'))
+        ).pipe(
+          Layer.provide(
+            Layer.succeed(
+              HttpClient.HttpClient,
+              fakeAnthropic(usage, refreshed, checked)
+            )
+          )
+        )
       )
-    )
-  ).pipe(Layer.provide(NodeServices.layer))
+    ),
+    Layer.provide(NodeServices.layer)
+  )
 
   const readJson = Effect.fnUntraced(function* (file: string) {
     return yield* Schema.decodeUnknownEffect(JsonObject)(
@@ -182,9 +207,13 @@ export const make = Effect.fnUntraced(function* (options: {
 
   return {
     layer,
+    /** Where a daemon of this sandbox would listen. */
+    socket: path.join(directory, 'tagteam.sock'),
     usage,
     /** The refresh tokens sent to Anthropic. */
     refreshed,
+    /** The accounts whose usage was requested from Anthropic, in order. */
+    checked,
     logIn,
     /** What Claude Code finds on disk. */
     claudeCode: Effect.all({

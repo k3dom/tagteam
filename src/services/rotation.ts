@@ -5,91 +5,18 @@ import {
   Duration,
   Effect,
   Equal,
-  Match,
+  Layer,
   Option,
   pipe,
-  Record,
   Ref,
-  Result,
   Schedule,
 } from 'effect'
 
 import * as Login from '#/domain/login.ts'
 import * as Policy from '#/domain/policy.ts'
-import type * as Usage from '#/domain/usage.ts'
+import * as ClaudeCode from '#/lib/claude-code.ts'
 import * as Accounts from '#/services/accounts.ts'
-import * as Anthropic from '#/services/anthropic.ts'
-import * as ClaudeCode from '#/services/claude-code.ts'
-
-const isFresh = Effect.fnUntraced(function* (tokens: Login.Tokens) {
-  return DateTime.isGreaterThan(
-    DateTime.makeUnsafe(tokens.expiresAt),
-    DateTime.add(yield* DateTime.now, { minutes: 5 })
-  )
-})
-
-/**
- * Tokens for an account Claude Code isn't using, refreshed first when they
- * are about to expire. Only tagteam holds these tokens, so refreshing them
- * can't race with Claude Code.
- */
-const tokensOf = Effect.fnUntraced(function* (login: Login.Login) {
-  const claude = yield* ClaudeCode.ClaudeCode
-  const accounts = yield* Accounts.Accounts
-  const anthropic = yield* Anthropic.Anthropic
-  if (yield* isFresh(login.credentials.claudeAiOauth)) {
-    return login.credentials.claudeAiOauth
-  }
-  return yield* accounts.modify(
-    Effect.fnUntraced(function* (stored) {
-      // Another tagteam process may have switched Claude Code to this account
-      // since `login` was read. Its tokens are then Claude Code's to refresh.
-      const live = Option.filter(yield* claude.current(), (current) =>
-        Login.sameAccount(current, login)
-      )
-      if (Option.isSome(live)) {
-        return [live.value.credentials.claudeAiOauth, stored] as const
-      }
-      const current = Option.getOrElse(Login.find(stored, login), () => login)
-      const tokens = current.credentials.claudeAiOauth
-      if (yield* isFresh(tokens)) {
-        return [tokens, stored] as const
-      }
-      const refreshed = yield* anthropic.refresh(tokens)
-      return [
-        refreshed,
-        Login.replace(stored, {
-          ...current,
-          credentials: { ...current.credentials, claudeAiOauth: refreshed },
-        }),
-      ] as const
-    })
-  )
-})
-
-/**
- * Fetches the usage of an account. For the account Claude Code is using it
- * returns `None` once the access token has expired, since only Claude Code
- * may refresh it and does so on its next request.
- */
-export const usageOf = Effect.fn('Rotation.usageOf')(function* (
-  login: Login.Login,
-  options: { readonly active: boolean }
-) {
-  const anthropic = yield* Anthropic.Anthropic
-  const tokens = options.active
-    ? login.credentials.claudeAiOauth
-    : yield* tokensOf(login)
-  if (
-    !DateTime.isGreaterThan(
-      DateTime.makeUnsafe(tokens.expiresAt),
-      yield* DateTime.now
-    )
-  ) {
-    return Option.none()
-  }
-  return Option.some(yield* anthropic.usage(tokens.accessToken))
-})
+import * as UsageCache from '#/services/usage-cache.ts'
 
 export interface Settings {
   /** Percentage of a limit at which tagteam switches away from an account. */
@@ -97,20 +24,11 @@ export interface Settings {
   readonly interval: Duration.Input
 }
 
-interface Check {
-  readonly usage: Option.Option<Usage.Usage>
-  readonly checkedAt: DateTime.Utc
-  readonly retryAt: DateTime.Utc
-}
-
 export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
   make: Effect.fnUntraced(function* (settings: Settings) {
     const claude = yield* ClaudeCode.ClaudeCode
     const accounts = yield* Accounts.Accounts
-    const services = yield* Effect.context<
-      ClaudeCode.ClaudeCode | Accounts.Accounts | Anthropic.Anthropic
-    >()
-    const checks = yield* Ref.make<Record<string, Check>>({})
+    const usageCache = yield* UsageCache.UsageCache
     const lastNotice = yield* Ref.make(Option.none<string>())
 
     const notice = Effect.fnUntraced(function* (message: string) {
@@ -118,76 +36,6 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
       if (!Option.contains(previous, message)) {
         yield* Effect.logWarning(message)
       }
-    })
-
-    const retryDelay = Match.type<
-      Effect.Error<ReturnType<typeof usageOf>>
-    >().pipe(
-      Match.when(
-        { _tag: 'AnthropicError', reason: { _tag: 'RateLimited' } },
-        ({ reason }) => reason.retryAfter ?? Duration.minutes(5)
-      ),
-      Match.when(
-        { _tag: 'AnthropicError', reason: { _tag: 'InvalidGrant' } },
-        () => Duration.hours(1)
-      ),
-      Match.orElse(() => Duration.fromInputUnsafe(settings.interval))
-    )
-
-    // The active account is checked on every tick. The others only change
-    // when they are used elsewhere, so they are checked less often.
-    const cachedUsageOf = Effect.fnUntraced(function* (
-      login: Login.Login,
-      active: boolean
-    ) {
-      const key = Login.id(login)
-      const now = yield* DateTime.now
-      const previous = Record.get(yield* Ref.get(checks), key)
-      const known = Option.flatMap(previous, (check) => check.usage)
-      const due = Option.match(previous, {
-        onNone: () => true,
-        onSome: (check) =>
-          DateTime.isGreaterThanOrEqualTo(now, check.retryAt) &&
-          (active ||
-            Duration.isGreaterThanOrEqualTo(
-              DateTime.distance(check.checkedAt, now),
-              Duration.minutes(5)
-            )),
-      })
-      if (!due) {
-        return known
-      }
-
-      const next = yield* Result.match(
-        yield* usageOf(login, { active }).pipe(
-          Effect.provideContext(services),
-          Effect.result
-        ),
-        {
-          onSuccess: (usage) =>
-            Effect.succeed<Check>({
-              usage: Option.orElse(usage, () => known),
-              checkedAt: now,
-              retryAt: now,
-            }),
-          onFailure: Effect.fnUntraced(function* (error) {
-            const delay = retryDelay(error)
-            yield* Effect.logWarning(
-              `Couldn't check the usage of ${Login.email(login)}. ${error.message} Checking again in ${Duration.format(delay)}.`
-            )
-            return {
-              usage: known,
-              checkedAt: Option.match(previous, {
-                onNone: () => DateTime.makeUnsafe(0),
-                onSome: (check) => check.checkedAt,
-              }),
-              retryAt: DateTime.addDuration(now, delay),
-            }
-          }),
-        }
-      )
-      yield* Ref.update(checks, Record.set(key, next))
-      return next.usage
     })
 
     const tick = Effect.fn('Rotation.tick')(function* () {
@@ -214,11 +62,14 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
         managed,
         Effect.fnUntraced(function* (login) {
           const active = Login.sameAccount(login, live.value)
-          const usage = yield* cachedUsageOf(
-            active ? live.value : login,
-            active
-          )
-          return { login, active, usage }
+          const check = yield* usageCache.get(active ? live.value : login, {
+            active,
+          })
+          return {
+            login,
+            active,
+            usage: Option.map(check.latest, (latest) => latest.usage),
+          }
         })
       )
       const now = yield* DateTime.now
@@ -288,3 +139,6 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
     return { tick, run }
   }),
 }) {}
+
+export const layer = (settings: Settings) =>
+  Layer.effect(Rotation, Rotation.make(settings))
