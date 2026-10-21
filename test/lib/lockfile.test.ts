@@ -3,7 +3,7 @@ import { assert, layer } from '@effect/vitest'
 import { assertFailure } from '@effect/vitest/utils'
 import { DateTime, Effect, Fiber, FileSystem, Path } from 'effect'
 
-import * as Lockfile from '#/Lockfile.ts'
+import * as Lockfile from '#/lib/lockfile.ts'
 
 const lockPath = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem

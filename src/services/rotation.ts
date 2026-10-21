@@ -14,60 +14,14 @@ import {
   Schedule,
 } from 'effect'
 
-import * as Accounts from '#/Accounts.ts'
-import * as Anthropic from '#/Anthropic.ts'
-import * as ClaudeCode from '#/ClaudeCode.ts'
+import * as Login from '#/domain/login.ts'
+import * as Policy from '#/domain/policy.ts'
+import type * as Usage from '#/domain/usage.ts'
+import * as Accounts from '#/services/accounts.ts'
+import * as Anthropic from '#/services/anthropic.ts'
+import * as ClaudeCode from '#/services/claude-code.ts'
 
-interface Limit {
-  readonly name: '5-hour' | 'weekly'
-  readonly window: Anthropic.Window
-}
-
-const exhausted = (
-  usage: Anthropic.Usage,
-  threshold: number,
-  now: DateTime.Utc
-): Option.Option<Limit> =>
-  Array.findFirst(
-    [
-      { name: '5-hour' as const, window: usage.fiveHour },
-      { name: 'weekly' as const, window: usage.sevenDay },
-    ],
-    (limit): limit is Limit =>
-      limit.window !== null &&
-      limit.window.utilization >= threshold &&
-      (limit.window.resetsAt === null ||
-        DateTime.isGreaterThan(limit.window.resetsAt, now))
-  )
-
-interface Candidate {
-  readonly login: ClaudeCode.Login
-  readonly active: boolean
-  readonly usage: Option.Option<Anthropic.Usage>
-}
-
-/**
- * The account Claude Code should switch to: the first one in priority order
- * that is under its limits. An account whose usage is unknown only counts as
- * under its limits while it is active, so that tagteam never switches to an
- * account it couldn't check.
- */
-const choose = (
-  candidates: ReadonlyArray<Candidate>,
-  threshold: number,
-  now: DateTime.Utc
-): Option.Option<Candidate> =>
-  pipe(
-    Array.findFirst(candidates, ({ active, usage }) =>
-      Option.match(usage, {
-        onNone: () => active,
-        onSome: (known) => Option.isNone(exhausted(known, threshold, now)),
-      })
-    ),
-    Option.filter(({ active }) => !active)
-  )
-
-const isFresh = Effect.fnUntraced(function* (tokens: ClaudeCode.Tokens) {
+const isFresh = Effect.fnUntraced(function* (tokens: Login.Tokens) {
   return DateTime.isGreaterThan(
     DateTime.makeUnsafe(tokens.expiresAt),
     DateTime.add(yield* DateTime.now, { minutes: 5 })
@@ -79,7 +33,7 @@ const isFresh = Effect.fnUntraced(function* (tokens: ClaudeCode.Tokens) {
  * are about to expire. Only tagteam holds these tokens, so refreshing them
  * can't race with Claude Code.
  */
-const tokensOf = Effect.fnUntraced(function* (login: ClaudeCode.Login) {
+const tokensOf = Effect.fnUntraced(function* (login: Login.Login) {
   const claude = yield* ClaudeCode.ClaudeCode
   const accounts = yield* Accounts.Accounts
   const anthropic = yield* Anthropic.Anthropic
@@ -91,15 +45,12 @@ const tokensOf = Effect.fnUntraced(function* (login: ClaudeCode.Login) {
       // Another tagteam process may have switched Claude Code to this account
       // since `login` was read. Its tokens are then Claude Code's to refresh.
       const live = Option.filter(yield* claude.current(), (current) =>
-        ClaudeCode.sameAccount(current, login)
+        Login.sameAccount(current, login)
       )
       if (Option.isSome(live)) {
         return [live.value.credentials.claudeAiOauth, stored] as const
       }
-      const current = Option.getOrElse(
-        Accounts.find(stored, login),
-        () => login
-      )
+      const current = Option.getOrElse(Login.find(stored, login), () => login)
       const tokens = current.credentials.claudeAiOauth
       if (yield* isFresh(tokens)) {
         return [tokens, stored] as const
@@ -107,7 +58,7 @@ const tokensOf = Effect.fnUntraced(function* (login: ClaudeCode.Login) {
       const refreshed = yield* anthropic.refresh(tokens)
       return [
         refreshed,
-        Accounts.replace(stored, {
+        Login.replace(stored, {
           ...current,
           credentials: { ...current.credentials, claudeAiOauth: refreshed },
         }),
@@ -122,7 +73,7 @@ const tokensOf = Effect.fnUntraced(function* (login: ClaudeCode.Login) {
  * may refresh it and does so on its next request.
  */
 export const usageOf = Effect.fn('Rotation.usageOf')(function* (
-  login: ClaudeCode.Login,
+  login: Login.Login,
   options: { readonly active: boolean }
 ) {
   const anthropic = yield* Anthropic.Anthropic
@@ -147,7 +98,7 @@ export interface Settings {
 }
 
 interface Check {
-  readonly usage: Option.Option<Anthropic.Usage>
+  readonly usage: Option.Option<Usage.Usage>
   readonly checkedAt: DateTime.Utc
   readonly retryAt: DateTime.Utc
 }
@@ -186,10 +137,10 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
     // The active account is checked on every tick. The others only change
     // when they are used elsewhere, so they are checked less often.
     const cachedUsageOf = Effect.fnUntraced(function* (
-      login: ClaudeCode.Login,
+      login: Login.Login,
       active: boolean
     ) {
-      const key = ClaudeCode.id(login)
+      const key = Login.id(login)
       const now = yield* DateTime.now
       const previous = Record.get(yield* Ref.get(checks), key)
       const known = Option.flatMap(previous, (check) => check.usage)
@@ -222,7 +173,7 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
           onFailure: Effect.fnUntraced(function* (error) {
             const delay = retryDelay(error)
             yield* Effect.logWarning(
-              `Couldn't check the usage of ${ClaudeCode.email(login)}. ${error.message} Checking again in ${Duration.format(delay)}.`
+              `Couldn't check the usage of ${Login.email(login)}. ${error.message} Checking again in ${Duration.format(delay)}.`
             )
             return {
               usage: known,
@@ -247,22 +198,22 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
         )
       }
       const managed = yield* accounts.list()
-      const stored = Accounts.find(managed, live.value)
+      const stored = Login.find(managed, live.value)
       if (Option.isNone(stored)) {
         return yield* notice(
-          `Claude Code is logged into ${ClaudeCode.email(live.value)}, which tagteam doesn't manage, so tagteam leaves it alone. Run \`tagteam add\` to add it.`
+          `Claude Code is logged into ${Login.email(live.value)}, which tagteam doesn't manage, so tagteam leaves it alone. Run \`tagteam add\` to add it.`
         )
       }
       // Claude Code refreshes the tokens of the account it uses. Keeping the
       // stored copy in step means the account survives a /login to another.
       if (!Equal.equals(stored.value, live.value)) {
-        yield* accounts.update((all) => Accounts.replace(all, live.value))
+        yield* accounts.update((all) => Login.replace(all, live.value))
       }
 
       const candidates = yield* Effect.forEach(
         managed,
         Effect.fnUntraced(function* (login) {
-          const active = ClaudeCode.sameAccount(login, live.value)
+          const active = Login.sameAccount(login, live.value)
           const usage = yield* cachedUsageOf(
             active ? live.value : login,
             active
@@ -274,13 +225,15 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
       const limit = pipe(
         Array.findFirst(candidates, ({ active }) => active),
         Option.flatMap(({ usage }) => usage),
-        Option.flatMap((usage) => exhausted(usage, settings.threshold, now))
+        Option.flatMap((usage) =>
+          Policy.exhausted(usage, settings.threshold, now)
+        )
       )
-      const target = choose(candidates, settings.threshold, now)
+      const target = Policy.choose(candidates, settings.threshold, now)
       if (Option.isNone(target)) {
         if (Option.isSome(limit)) {
           return yield* notice(
-            `Every account is near its limits, so Claude Code stays on ${ClaudeCode.email(live.value)}.`
+            `Every account is near its limits, so Claude Code stays on ${Login.email(live.value)}.`
           )
         }
         return yield* Ref.set(lastNotice, Option.none())
@@ -293,7 +246,7 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
         Effect.fnUntraced(function* (all) {
           const replaced = yield* claude.activate(
             Option.getOrElse(
-              Accounts.find(all, target.value.login),
+              Login.find(all, target.value.login),
               () => target.value.login
             ),
             live.value
@@ -302,7 +255,7 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
             Option.isSome(replaced),
             Option.match(replaced, {
               onNone: () => all,
-              onSome: (outgoing) => Accounts.replace(all, outgoing),
+              onSome: (outgoing) => Login.replace(all, outgoing),
             }),
           ] as const
         })
@@ -313,12 +266,12 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
       yield* Ref.set(lastNotice, Option.none())
       const reason = Option.match(limit, {
         onSome: ({ name, window }) =>
-          `${ClaudeCode.email(live.value)} has used ${window.utilization}% of its ${name} limit.`,
+          `${Login.email(live.value)} has used ${window.utilization}% of its ${name} limit.`,
         onNone: () =>
-          `${ClaudeCode.email(target.value.login)} comes first and is under its limits.`,
+          `${Login.email(target.value.login)} comes first and is under its limits.`,
       })
       yield* Effect.logInfo(
-        `Switched Claude Code from ${ClaudeCode.email(live.value)} to ${ClaudeCode.email(target.value.login)}, because ${reason}`
+        `Switched Claude Code from ${Login.email(live.value)} to ${Login.email(target.value.login)}, because ${reason}`
       )
     })
 

@@ -21,19 +21,8 @@ import {
 } from 'effect/http'
 import { ChildProcess, ChildProcessSpawner } from 'effect/process'
 
-import type * as ClaudeCode from '#/ClaudeCode.ts'
-
-const Window = Schema.Struct({
-  utilization: Schema.Number,
-  resetsAt: Schema.NullOr(Schema.DateTimeUtcFromString),
-}).pipe(Schema.encodeKeys({ resetsAt: 'resets_at' }))
-export type Window = typeof Window.Type
-
-const Usage = Schema.Struct({
-  fiveHour: Schema.NullOr(Window),
-  sevenDay: Schema.NullOr(Window),
-}).pipe(Schema.encodeKeys({ fiveHour: 'five_hour', sevenDay: 'seven_day' }))
-export type Usage = typeof Usage.Type
+import type * as Login from '#/domain/login.ts'
+import * as Usage from '#/domain/usage.ts'
 
 export class RateLimited extends Schema.TaggedError<
   RateLimited,
@@ -166,7 +155,7 @@ export class Anthropic extends Context.Service<Anthropic>()(
               HttpClientRequest.setHeader('anthropic-beta', 'oauth-2025-04-20')
             )
           )
-          return yield* HttpClientResponse.schemaBodyJson(Usage)(response)
+          return yield* HttpClientResponse.schemaBodyJson(Usage.Usage)(response)
         },
         Effect.catchReason(
           'HttpClientError',
@@ -192,7 +181,7 @@ export class Anthropic extends Context.Service<Anthropic>()(
       })
 
       const refresh = Effect.fn('Anthropic.refresh')(
-        function* (tokens: ClaudeCode.Tokens) {
+        function* (tokens: Login.Tokens) {
           const response = yield* http.execute(
             HttpClientRequest.post(
               'https://platform.claude.com/v1/oauth/token'
@@ -221,7 +210,7 @@ export class Anthropic extends Context.Service<Anthropic>()(
             ...(body.refresh_token_expires_in !== undefined && {
               refreshTokenExpiresAt: after(body.refresh_token_expires_in),
             }),
-          } satisfies ClaudeCode.Tokens
+          } satisfies Login.Tokens
         },
         Effect.catchReason(
           'HttpClientError',

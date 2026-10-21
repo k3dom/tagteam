@@ -2,9 +2,10 @@ import { NodeServices } from '@effect/platform-node'
 import { DateTime, Effect, FileSystem, Layer, Path, Schema } from 'effect'
 import { HttpClient, HttpClientResponse } from 'effect/http'
 
-import * as Accounts from '#/Accounts.ts'
-import * as Anthropic from '#/Anthropic.ts'
-import * as ClaudeCode from '#/ClaudeCode.ts'
+import type * as Login from '#/domain/login.ts'
+import * as Accounts from '#/services/accounts.ts'
+import * as Anthropic from '#/services/anthropic.ts'
+import * as ClaudeCode from '#/services/claude-code.ts'
 
 export const start = DateTime.makeUnsafe('2026-10-21T08:00:00Z')
 
@@ -14,7 +15,7 @@ export const at = (offset: Partial<DateTime.DateTime.PartsForMath>) =>
 export const login = (
   name: string,
   options: { readonly generation?: number; readonly expiresAt?: number } = {}
-): ClaudeCode.Login => ({
+): Login.Login => ({
   oauthAccount: {
     accountUuid: `${name}-uuid`,
     emailAddress: `${name}@example.com`,
@@ -121,8 +122,8 @@ const JsonObject = Schema.fromJsonString(
  * holding `accounts`, in a temporary directory, with a fake Anthropic.
  */
 export const make = Effect.fnUntraced(function* (options: {
-  readonly live: ClaudeCode.Login
-  readonly accounts: ReadonlyArray<ClaudeCode.Login>
+  readonly live: Login.Login
+  readonly accounts: ReadonlyArray<Login.Login>
 }) {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
@@ -133,7 +134,7 @@ export const make = Effect.fnUntraced(function* (options: {
   const data = path.join(directory, 'tagteam')
 
   /** Simulates Claude Code logging in or refreshing its tokens. */
-  const logIn = Effect.fnUntraced(function* (next: ClaudeCode.Login) {
+  const logIn = Effect.fnUntraced(function* (next: Login.Login) {
     yield* fs.writeFileString(
       credentials,
       JSON.stringify({

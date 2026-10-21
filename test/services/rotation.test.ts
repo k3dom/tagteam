@@ -4,7 +4,7 @@ import { assertSome, deepStrictEqual } from '@effect/vitest/utils'
 import { Effect, Option } from 'effect'
 import { TestClock } from 'effect/testing'
 
-import * as Rotation from '#/Rotation.ts'
+import * as Rotation from '#/services/rotation.ts'
 import * as Sandbox from '#test/sandbox.ts'
 
 const { at, login, start } = Sandbox
