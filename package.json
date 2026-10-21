@@ -1,0 +1,41 @@
+{
+  "name": "tagteam",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Rotates Claude Code between your accounts as they near their rate limits, and returns to your main account once it recovers",
+  "license": "MIT",
+  "bin": {
+    "tagteam": "./src/index.ts"
+  },
+  "type": "module",
+  "imports": {
+    "#/*": "./src/*",
+    "#test/*": "./test/*",
+    "#package.json": "./package.json"
+  },
+  "scripts": {
+    "prepare": "effect-tsgo patch --no-typescript --oxlint",
+    "start": "node ./src/index.ts",
+    "test": "vitest run",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint",
+    "check": "pnpm run lint && pnpm run format:check"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.5",
+    "effect": "4.0.5"
+  },
+  "devDependencies": {
+    "@effect/tsgo": "0.55.0",
+    "@effect/vitest": "4.0.5",
+    "@types/node": "26.6.5",
+    "@vitest/coverage-v8": "5.0.5",
+    "oxfmt": "0.74.0",
+    "oxlint": "1.89.0",
+    "oxlint-tsgolint": "7.0.2004",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  },
+  "packageManager": "pnpm@12.9.0"
+}

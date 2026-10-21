@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+*.tsbuildinfo
+result
+.direnv
+.env
+.env*.local
+.agents/context
+.vscode
+.idea
