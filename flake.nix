@@ -1,15 +1,38 @@
 {
-  description = "Development environment for tagteam";
+  description = "Rotates Claude Code between your accounts as they near their rate limits";
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   };
-  outputs = {nixpkgs, ...}: let
+  outputs = {
+    self,
+    nixpkgs,
+    ...
+  }: let
     eachSupportedSystem = f:
+      nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-linux"] (
+        system: f nixpkgs.legacyPackages.${system}
+      );
+    eachDevSystem = f:
       nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed (
-        system: f {pkgs = import nixpkgs {inherit system;};}
+        system: f nixpkgs.legacyPackages.${system}
       );
   in {
-    devShells = eachSupportedSystem ({pkgs}: {
+    packages = eachSupportedSystem (pkgs: {
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.tagteam;
+      tagteam = pkgs.callPackage ./nix/package.nix {};
+    });
+
+    overlays.default = _: prev: {
+      tagteam = prev.callPackage ./nix/package.nix {};
+    };
+
+    homeManagerModules.default = import ./nix/home-manager.nix self;
+
+    checks = eachSupportedSystem (pkgs: {
+      tagteam = self.packages.${pkgs.stdenv.hostPlatform.system}.tagteam;
+    });
+
+    devShells = eachDevSystem (pkgs: {
       default = pkgs.mkShell {
         packages = with pkgs; [
           nodejs_26
@@ -32,6 +55,6 @@
         '';
       };
     });
-    formatter = eachSupportedSystem ({pkgs}: pkgs.alejandra);
+    formatter = eachDevSystem (pkgs: pkgs.alejandra);
   };
 }

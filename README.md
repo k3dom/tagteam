@@ -25,20 +25,26 @@ tagteam daemon          # watch usage and switch accounts
 - It checks the active account every minute and the others every five minutes.
 - `--threshold <percent>` and `--interval <seconds>` change the defaults.
 
-To keep the daemon running, use a systemd user service:
+## Nix
 
-```ini
-# ~/.config/systemd/user/tagteam.service
-[Unit]
-Description=Rotate Claude Code between accounts
+The flake provides a package and a Home Manager module that runs the daemon as a
+systemd user service:
 
-[Service]
-ExecStart=%h/path/to/tagteam/src/index.ts daemon
-Restart=on-failure
+```nix
+# flake.nix
+inputs.tagteam.url = "github:k3dom/tagteam";
 
-[Install]
-WantedBy=default.target
+# Home Manager configuration
+imports = [inputs.tagteam.homeManagerModules.default];
+services.tagteam.enable = true;
 ```
+
+- `services.tagteam.threshold` and `services.tagteam.interval` set the daemon's
+  flags.
+- With `programs.claude-code` enabled, the service puts Claude Code on its
+  `PATH`, since tagteam identifies itself with Claude Code's version.
+
+Without Nix, run `tagteam daemon` as a service of your own.
 
 ## How it works
 
@@ -63,4 +69,8 @@ pnpm install
 pnpm start --help
 pnpm test
 pnpm check     # oxlint with type checking, then oxfmt
+nix flake check
 ```
+
+After changing dependencies, update the hash in `nix/package.nix`: set it to
+`""`, run `nix build`, and copy the hash it reports.
