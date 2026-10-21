@@ -2,3 +2,4 @@
 # Managed by scripts/add-subtree.sh and scripts/update-subtree.sh.
 # Format: <prefix>\t<url>\t<ref>\t<package>=<tag-template>
 .agents/repos/effect	https://github.com/Effect-TS/effect.git	effect@4.0.5	effect=effect@{v}
+.agents/repos/claude-swap	https://github.com/realiti4/claude-swap.git	v0.27.2	
