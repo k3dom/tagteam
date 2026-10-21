@@ -1,0 +1,72 @@
+[graph]
+# Empty = evaluate ALL targets (the thorough audit). Every platform-specific dep
+# in the tree is checked, not just the host's.
+targets = []
+
+# ---------------------------------------------------------------------------
+# Advisories
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+# Deny crates with unpatched security advisories.
+yanked = "deny"
+# Triage queue. With an empty list, any new advisory hard-blocks CI until it is
+# either fixed (bump the dep) or parked here after review. Park accepted ones as
+# `{ id = "RUSTSEC-YYYY-NNNN", reason = "why it's safe / no fix yet" }`; revisit
+# each on the next audit. cargo-deny v2 has no time-based grace period — this
+# explicit list IS the triage record.
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+# No [[licenses.clarify]] blocks: a clarify pins a license file's content hash,
+# so any upstream edit to that file voids the clarification.
+# Licenses actually present in the dependency tree (derived from `cargo metadata`).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "0BSD",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "MPL-2.0",
+    "LGPL-2.1-or-later",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    # notify v8 ships CC0-1.0 alone (LICENSE-CC0, no MIT twin). CC0 is
+    # FSF-approved; notify is the only CC0 crate in the tree.
+    "CC0-1.0",
+]
+# Confidence threshold for SPDX expression matching.
+confidence-threshold = 0.8
+
+# ---------------------------------------------------------------------------
+# Bans
+# ---------------------------------------------------------------------------
+[bans]
+# Deny duplicate versions of the same crate unless explicitly allowed below.
+multiple-versions = "warn"
+# Wildcards in Cargo.toml dep specs are sloppy; flag them.
+wildcards = "deny"
+# Deny known-broken / security-risky crates.
+deny = [
+    # old unmaintained time 0.1 has known RUSTSEC advisories
+    { name = "time", version = "<0.2" },
+    # openssl-sys — prefer rustls; flag if it ever sneaks in
+    { name = "openssl-sys" },
+    { name = "openssl" },
+]
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

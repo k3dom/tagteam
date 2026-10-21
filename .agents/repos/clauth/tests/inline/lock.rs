@@ -1,0 +1,399 @@
+use super::*;
+
+use std::sync::{Arc, Barrier};
+use std::time::Instant;
+
+/// Two threads entering `with_state_lock` simultaneously must serialize their
+/// closures — no two intervals may overlap.
+#[test]
+fn cross_thread_with_state_lock_serializes() {
+    // Sandbox-pinned: the lock path resolves through the process-global home
+    // override, and without holding the sandbox lock a concurrently-running
+    // sandboxed test can swap that override mid-test — two of the threads
+    // below would then flock DIFFERENT files and legitimately overlap
+    // (observed as a rare parallel-run flake, 2026-07-09).
+    let _home = crate::testutil::HomeSandbox::new();
+    const THREADS: usize = 4;
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let intervals = Arc::new(std::sync::Mutex::new(Vec::<(u64, u64)>::new()));
+    let epoch = Instant::now();
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let intervals = Arc::clone(&intervals);
+            std::thread::spawn(move || {
+                // All threads rendezvous here to maximize concurrent entry.
+                barrier.wait();
+                with_state_lock(|_held| {
+                    let start = epoch.elapsed().as_nanos() as u64;
+                    // Sleep widens the interval so overlaps are detectable.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    let end = epoch.elapsed().as_nanos() as u64;
+                    intervals.lock().unwrap().push((start, end));
+                    Ok(())
+                })
+                .expect("with_state_lock failed");
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("thread panicked");
+    }
+
+    let intervals = intervals.lock().unwrap();
+    assert_eq!(
+        intervals.len(),
+        THREADS,
+        "each thread must record one interval"
+    );
+
+    // [a_start, a_end) and [b_start, b_end) overlap when a_start < b_end && b_start < a_end.
+    for i in 0..intervals.len() {
+        for j in (i + 1)..intervals.len() {
+            let (a_start, a_end) = intervals[i];
+            let (b_start, b_end) = intervals[j];
+            assert!(
+                a_end <= b_start || b_end <= a_start,
+                "intervals overlap: [{a_start}, {a_end}) and [{b_start}, {b_end})"
+            );
+        }
+    }
+}
+
+/// Same-thread nested `with_state_lock` calls must not deadlock.
+#[test]
+fn same_thread_reentrancy_does_not_deadlock() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let result =
+        with_state_lock(|_held| with_state_lock(|_held| with_state_lock(|_held| Ok(42u32))));
+    assert_eq!(result.unwrap(), 42);
+}
+
+/// A panic inside the closure unwinds through `StateLock::Drop`, which closes
+/// the flock `File` and releases `THREAD_LOCK` (poisoning it). The next
+/// acquisition must recover via `into_inner()`, observe the cleared slot, and
+/// re-flock — the lock must not be permanently wedged.
+#[test]
+fn poison_recovery_after_panicking_closure() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let _home = crate::testutil::HomeSandbox::new();
+
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        let _guard = StateLock::acquire().expect("acquire before panic");
+        panic!("closure blew up while holding the state lock");
+    }));
+    assert!(panicked.is_err(), "the inner closure must have panicked");
+
+    // DEPTH resets to 0 — Drop ran during unwind.
+    DEPTH.with(|d| assert_eq!(d.get(), 0, "depth must reset to 0 after unwind"));
+
+    // So does the subprocess budget. A spent budget surviving the unwind would
+    // strangle the very recovery path below, on a thread nothing is waiting on.
+    let huge = Duration::from_secs(3600);
+    assert_eq!(
+        clamp_to_hold_budget(huge),
+        huge,
+        "the panicking hold must release its subprocess budget while unwinding"
+    );
+
+    // THREAD_LOCK poisoned + slot None; fresh acquire must recover and re-flock.
+    let result = with_state_lock(|_held| Ok(7u32));
+    assert_eq!(result.unwrap(), 7, "lock must be reusable after a panic");
+
+    // Reentrancy must still work post-recovery.
+    let again = with_state_lock(|_held| with_state_lock(|_held| Ok(8u32)));
+    assert_eq!(again.unwrap(), 8, "reentrancy still works post-recovery");
+}
+
+/// The subprocess budget belongs to the HOLD, so it binds inside one and nothing
+/// outside one. A caller with no state lock blocks no peer (`oauth.rs` mirrors a
+/// rotation after its lock closure ends), so clamping it would cost a deadline
+/// with nobody to spend it on.
+#[test]
+fn the_subprocess_budget_binds_only_inside_a_hold() {
+    let _home = crate::testutil::HomeSandbox::new();
+    // Larger than any real deadline, so the clamp is the only thing that can
+    // shrink it and the assertions read the budget rather than the base.
+    let huge = Duration::from_secs(3600);
+
+    assert_eq!(
+        clamp_to_hold_budget(huge),
+        huge,
+        "outside a hold there is nothing to bound"
+    );
+
+    with_state_lock(|_held| {
+        let inside = clamp_to_hold_budget(huge);
+        assert!(
+            inside <= SUBPROCESS_BUDGET,
+            "a hold caps its subprocess work at SUBPROCESS_BUDGET, got {inside:?}"
+        );
+        assert!(
+            inside > Duration::ZERO,
+            "a fresh hold must start with budget to spend, got {inside:?}"
+        );
+        Ok(())
+    })
+    .expect("hold");
+
+    assert_eq!(
+        clamp_to_hold_budget(huge),
+        huge,
+        "releasing the outermost hold releases its budget"
+    );
+}
+
+/// The daemon's tick arms ONE budget its two sequential drains share. The
+/// pre-fix shape armed a fresh budget per acquisition, so a tick draining a
+/// queued switch and a queued switch-off got 20 s apiece against the daemon's
+/// 30 s watchdog. Every acquisition inside the shared scope must spend the
+/// SHARED window rather than a fresh one, and must not clear it on release —
+/// the second iteration is the drain the first one's budget must still bind.
+#[test]
+fn a_shared_budget_spans_sequential_acquisitions() {
+    let _home = crate::testutil::HomeSandbox::new();
+    // Short enough that a fresh 20 s budget and the shared remnant differ by
+    // an assertable margin; long enough for two flock round-trips.
+    let shared = Duration::from_millis(500);
+
+    let wide = SharedSubprocessBudget::arm(shared);
+    for i in 0..2 {
+        with_state_lock(|_held| Ok(())).expect("hold");
+        let left = clamp_to_hold_budget(Duration::from_secs(20));
+        assert!(
+            left <= shared,
+            "acquisition {i} inside the shared scope must spend the shared window, got {left:?}"
+        );
+    }
+    drop(wide);
+
+    // The shared guard disarms what it armed, so an unscoped hold is back on
+    // a full budget of its own.
+    with_state_lock(|_held| {
+        let inside = clamp_to_hold_budget(Duration::from_secs(20));
+        assert!(
+            inside > Duration::from_secs(19),
+            "after the shared scope drops, a fresh hold arms its own full budget, got {inside:?}"
+        );
+        Ok(())
+    })
+    .expect("hold");
+}
+
+/// A `SharedSubprocessBudget` taken INSIDE an already-budgeted scope adopts
+/// that scope's budget and clears nothing: the ownership chain stays single
+/// however the scopes nest, so the inner guard's drop leaves the wider
+/// scope's budget armed for the rest of its body. Pinned against BOTH
+/// failure directions with a SHORT outer budget: a full-budget assert cannot
+/// tell an adopted budget from a cleared one, since an unscoped clamp reads
+/// the full 20 s base either way.
+#[test]
+fn a_shared_scope_inside_a_hold_adopts_its_budget() {
+    let _home = crate::testutil::HomeSandbox::new();
+    // Short enough that an adopted remnant and a cleared-then-rearmed full
+    // budget differ by an assertable margin.
+    let shared = Duration::from_millis(500);
+
+    let wide = SharedSubprocessBudget::arm(shared);
+    with_state_lock(|_held| {
+        {
+            let _inner = SharedSubprocessBudget::arm(Duration::from_millis(10));
+        }
+        // The inner guard did not arm, so its drop cleared nothing; the wide
+        // scope's budget is still live and the hold inside it keeps spending it.
+        let inside = clamp_to_hold_budget(Duration::from_secs(20));
+        assert!(
+            inside <= shared,
+            "an adopting inner guard must not end the wider scope's budget, got {inside:?}"
+        );
+        Ok(())
+    })
+    .expect("hold");
+    drop(wide);
+}
+/// The budget is armed by the OUTERMOST acquisition alone. A reentrant hold that
+/// re-armed would hand each nested frame a full budget, which is exactly the
+/// shape this bounds: the two Keychain mirrors of a first-login-adopting switch
+/// reach `security` through nested `with_state_lock` frames, so a per-frame
+/// budget would bound neither of them together.
+#[test]
+fn a_reentrant_hold_keeps_spending_the_outer_budget() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let huge = Duration::from_secs(3600);
+
+    // Asserted as a MARGIN, never as `inner < outer`. Both readings are one
+    // deadline minus a different `now`, so a re-arming mutant lands them within
+    // nanoseconds of each other and a bare `<` passes on whichever way the noise
+    // fell — measured surviving a "re-arm on every acquisition" mutation. The
+    // sleep is what the correct code must visibly spend and the mutant cannot.
+    const SPENT: Duration = Duration::from_millis(50);
+
+    with_state_lock(|_held| {
+        let outer = clamp_to_hold_budget(huge);
+        std::thread::sleep(SPENT);
+        with_state_lock(|_held| {
+            let inner = clamp_to_hold_budget(huge);
+            let spent = outer.saturating_sub(inner);
+            assert!(
+                spent >= SPENT,
+                "a reentrant acquisition must keep spending the outer hold's budget, not \
+                 reset it: {SPENT:?} of sleep moved it only {spent:?} \
+                 (outer {outer:?}, inner {inner:?})"
+            );
+            Ok(())
+        })
+    })
+    .expect("nested hold");
+}
+
+/// The cross-process flock wait is bounded. With `~/.clauth/.lock` already held
+/// (here by a second, independent open file description — `flock(2)` locks are
+/// per-description, so this conflicts exactly as a second process would), an
+/// acquisition times out with a [`StateLockTimeout`] instead of hanging; once the
+/// holder releases, the next acquisition runs its closure. Both directions of the
+/// #35 wedge fix.
+#[test]
+fn held_flock_times_out_then_recovers_on_release() {
+    let _home = crate::testutil::HomeSandbox::new();
+    let dir = crate::profile::clauth_dir().expect("clauth dir");
+    crate::profile::mkdir_700(&dir).expect("mkdir ~/.clauth");
+    let lock_path = dir.join(LOCK_FILENAME);
+
+    // Stand in for a second process holding the state lock.
+    let holder = crate::profile::open_state_file(&lock_path).expect("open holder handle");
+    holder.lock().expect("hold the flock");
+
+    // Direction 1: a held flock times out at the deadline, never hangs.
+    let deadline = std::time::Duration::from_millis(300);
+    let start = Instant::now();
+    let err = match StateLock::acquire_with_timeout(deadline) {
+        Ok(_) => panic!("acquisition must time out while the flock is held"),
+        Err(e) => e,
+    };
+    let waited = start.elapsed();
+    assert!(
+        err.downcast_ref::<StateLockTimeout>().is_some(),
+        "a held flock must surface as StateLockTimeout, got: {err:#}"
+    );
+    assert!(
+        waited >= deadline,
+        "must wait the full deadline before timing out, waited {waited:?}"
+    );
+    assert!(
+        waited < deadline * 10,
+        "must return at the deadline, not hang, waited {waited:?}"
+    );
+
+    // Direction 2: once the holder releases, the next acquisition succeeds.
+    drop(holder);
+    let ran = with_state_lock(|_held| Ok(1234u32)).expect("acquire after the holder releases");
+    assert_eq!(ran, 1234, "closure runs once the flock is free");
+}
+
+/// Flock waits spend the armed budget like the shell-outs do: an acquisition
+/// inside a `SharedSubprocessBudget::arm_clamped` scope is clamped to what the
+/// window leaves, never handed a fresh full [`STATE_LOCK_TIMEOUT`]. The daemon's two
+/// drains take one acquisition each, so without the clamp a tick against a
+/// wedged holder waits 2 × `STATE_LOCK_TIMEOUT` (50 s) past the 30 s
+/// `WATCHDOG_DEADLINE`. The 1 s lock-timeout override keeps the broken wait
+/// observable in ~1 s instead of the real 25 s; the 300 ms budget is the bound
+/// that must win.
+#[test]
+fn an_armed_budget_clamps_the_flock_wait() {
+    let _home = crate::testutil::HomeSandbox::new();
+    set_state_lock_timeout_override(Some(std::time::Duration::from_secs(1)));
+    let dir = crate::profile::clauth_dir().expect("clauth dir");
+    crate::profile::mkdir_700(&dir).expect("mkdir ~/.clauth");
+    let holder =
+        crate::profile::open_state_file(&dir.join(LOCK_FILENAME)).expect("open holder handle");
+    holder.lock().expect("hold the flock");
+
+    let _wide = SharedSubprocessBudget::arm_clamped(std::time::Duration::from_millis(300));
+    let start = Instant::now();
+    let err = match StateLock::acquire() {
+        Ok(_) => panic!("acquisition must time out while the flock is held"),
+        Err(e) => e,
+    };
+    let waited = start.elapsed();
+    assert!(
+        err.downcast_ref::<StateLockTimeout>().is_some(),
+        "a held flock must surface as StateLockTimeout, got: {err:#}"
+    );
+    assert!(
+        waited >= std::time::Duration::from_millis(250),
+        "the clamped wait must still spend the window, not fail instantly, waited {waited:?}"
+    );
+    assert!(
+        waited < std::time::Duration::from_millis(500),
+        "the flock wait must be clamped to the armed budget (300 ms), not the full lock \
+         timeout, waited {waited:?}"
+    );
+
+    // The window the wait spent is gone: a second acquisition is handed no
+    // wait at all (immediate StateLockTimeout), never a fresh full one.
+    let second_start = Instant::now();
+    let err2 = match StateLock::acquire() {
+        Ok(_) => panic!("a spent window must hand the second acquisition no wait"),
+        Err(e) => e,
+    };
+    assert!(
+        err2.downcast_ref::<StateLockTimeout>().is_some(),
+        "the second acquisition must time out, got: {err2:#}"
+    );
+    assert!(
+        second_start.elapsed() < std::time::Duration::from_millis(100),
+        "a spent window hands the next acquisition no wait, waited {:?}",
+        second_start.elapsed()
+    );
+
+    // The window bounds the WAIT, never the hold: a freed flock still acquires
+    // instantly past a spent window.
+    drop(holder);
+    let ran = with_state_lock(|_held| Ok(1234u32)).expect("acquire after the holder releases");
+    assert_eq!(ran, 1234, "closure runs once the flock is free");
+
+    set_state_lock_timeout_override(None);
+}
+
+/// The negative twin of the clamp: a scope armed via the plain
+/// [`SharedSubprocessBudget::arm`] keeps the full [`STATE_LOCK_TIMEOUT`] for
+/// its flock wait, never clamping it to its own shorter budget. The macOS GC
+/// sweep and the session-seed carry arm a budget for their own shell-outs
+/// while a legit slow switch can hold the flock ~20 s; their waiter must
+/// survive that hold, not false-time-out at its own budget. A 300 ms lock
+/// timeout against a 50 ms budget makes the wrong clamp observable in ~50 ms
+/// instead of the real 25 s/20 s.
+#[test]
+fn a_plain_budget_does_not_clamp_the_flock_wait() {
+    let _home = crate::testutil::HomeSandbox::new();
+    set_state_lock_timeout_override(Some(std::time::Duration::from_millis(300)));
+    let dir = crate::profile::clauth_dir().expect("clauth dir");
+    crate::profile::mkdir_700(&dir).expect("mkdir ~/.clauth");
+    let holder =
+        crate::profile::open_state_file(&dir.join(LOCK_FILENAME)).expect("open holder handle");
+    holder.lock().expect("hold the flock");
+
+    // Budget shorter than the lock timeout: a clamped wait would time out at
+    // ~50 ms; the correct full wait sits at ~300 ms.
+    let _plain = SharedSubprocessBudget::arm(std::time::Duration::from_millis(50));
+    let start = Instant::now();
+    let err = match StateLock::acquire() {
+        Ok(_) => panic!("acquisition must time out while the flock is held"),
+        Err(e) => e,
+    };
+    assert!(
+        err.downcast_ref::<StateLockTimeout>().is_some(),
+        "a held flock must surface as StateLockTimeout, got: {err:#}"
+    );
+    assert!(
+        start.elapsed() >= std::time::Duration::from_millis(250),
+        "a plain budget must keep the full flock wait, not clamp it to the budget, waited {:?}",
+        start.elapsed()
+    );
+
+    drop(holder);
+    set_state_lock_timeout_override(None);
+}

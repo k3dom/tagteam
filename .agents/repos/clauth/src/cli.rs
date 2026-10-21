@@ -1,0 +1,839 @@
+//! `clauth`'s command grammar as clap derive types. The doc comments here ARE
+//! the help copy: clap maps a comment's first paragraph to `-h` and the whole
+//! comment to `--help`, so each command's prose lives beside the variant it
+//! documents and the root stays a two-column table.
+//!
+//! Three shapes are not plain subcommands and are load-bearing: a bare
+//! `clauth` launches the TUI ([`Cli::command`] is `None`), a bare unrecognized
+//! word switches to the profile of that name ([`Command::External`]), and
+//! `clauth start <profile> <claude args…>` forwards every token `start` does
+//! not declare to `claude` untouched, leading hyphens included.
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use crate::runtime::Isolation;
+
+/// Where a value-less `--listen` binds. Every interface, because the flag's
+/// whole purpose is a client on a different machine; a loopback default would
+/// parse fine and then serve nobody.
+pub(crate) const DEFAULT_LISTEN: &str = "0.0.0.0:8443";
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "clauth",
+    version,
+    about = "launcher and account manager for claude code",
+    after_help = "With no command, clauth launches the TUI; `clauth <profile>` switches to that account and exits \
+                  (deprecated, use `clauth switch <name>`). \
+                  The color depth can also be pinned in ~/.clauth/profiles.toml with `theme = \"full\"`."
+)]
+pub(crate) struct Cli {
+    /// Force a color depth instead of auto-detecting one (TUI only).
+    ///
+    /// `display_order` keeps the propagated copy at the bottom of every
+    /// subcommand's option list instead of clap's default slot near the top,
+    /// where a TUI-only flag reads as one of that command's own.
+    #[arg(long, global = true, value_name = "TIER", display_order = 900)]
+    pub(crate) theme: Option<ThemeArg>,
+
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+}
+
+/// `--theme`'s two tiers. Auto-detection (`$COLORTERM`) picks one when the flag
+/// and the config-file key are both absent.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ThemeArg {
+    /// 24-bit truecolor. Auto-detected when $COLORTERM is truecolor or 24bit.
+    Full,
+    /// The xterm-256 palette, safe on every terminal.
+    Compatible,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum Command {
+    /// Launch claude under a profile, in a per-profile CLAUDE_CONFIG_DIR
+    ///
+    /// Args clauth does not recognize go to `claude` untouched, leading hyphens
+    /// included, so `clauth start acme -p "hi"` reaches claude with its own
+    /// `-p`. Put clauth's own flags before the profile name; to send `claude` a
+    /// spelling clauth shares (`--help`), separate it with `--`.
+    Start(StartArgs),
+
+    /// Add a new account, or re-authenticate an existing one in place
+    ///
+    /// Neither switches to it. Bare (no --base-url/--api-key) runs the browser
+    /// OAuth flow and writes the minted tokens into the profile; the bare login
+    /// also prints a link to open on any device and takes the code that page
+    /// shows. Passing either endpoint flag captures an API-key account instead,
+    /// prompting for whatever a flag omitted (the key is read echo-off).
+    ///
+    /// An existing name re-authenticates in place: the fresh credential set
+    /// replaces the old one while the profile's chain slot, env, and model
+    /// settings survive. A browser login also leaves a stored endpoint and a
+    /// working api key standing, since it renews the subscription login and
+    /// that account's inference runs on the key. On an Alibaba Model Studio profile a bare login opens
+    /// that console instead, capturing the session its usage figures need; that
+    /// session expires 48 hours after the aliyun sign-in behind it rather than
+    /// after this login, so it can arrive with minutes left. That profile's
+    /// endpoint and api key are left untouched.
+    ///
+    /// Starting an Alibaba account from nothing therefore takes two steps: give
+    /// it a Model Studio endpoint first (a Qwen preset on the Setup tab, or
+    /// --base-url here), then run a bare login on that name. Which console a
+    /// session is captured from is read off the endpoint, so a name with no
+    /// endpoint yet has no console to open.
+    Login(LoginArgs),
+
+    /// Save the login Claude Code is using now as a new profile
+    ///
+    /// Reads the live ~/.claude/.credentials.json — plus whatever endpoint and
+    /// api key Claude Code is running on — and stores it under <name>, with no
+    /// browser flow. This is the way to adopt a login `claude` already minted,
+    /// including the one a first account is refused over when the live file
+    /// holds a login no profile owns. The first profile becomes the active
+    /// account; a later one needs `clauth <name>` to switch to. An existing
+    /// name is refused — re-authenticating one is `clauth login <name>`.
+    Capture {
+        /// Profile to save the current login under.
+        profile: String,
+    },
+
+    /// Remove a profile and all its credentials
+    Delete {
+        /// Profile to delete.
+        profile: String,
+        /// Skip the confirm prompt. Required on a non-TTY stdin, which gets no
+        /// implicit yes for an irreversible delete.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Delete even while a live `clauth start` session holds the profile.
+        /// Independent of --yes, which does not override this guard.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Hide a profile from auto-switch, usage polling, and the status feed
+    ///
+    /// Its dir and credentials stay on disk untouched. Refused for the active
+    /// profile, or one holding a live session.
+    Disable {
+        /// Profile to disable.
+        profile: String,
+        /// Skip the confirm prompt. Required on a non-TTY stdin.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Restore or remove a profile's long-lived session token
+    ///
+    /// The bare form is the inverse of `rolling-token`: it restores the static
+    /// `claude setup-token` mint the rolling token superseded, so sessions go
+    /// back to a year-scale bearer carrying two scopes, which nothing has to
+    /// re-stamp.
+    ///
+    /// `--clear` is the FULL exit instead: it removes the long-lived token,
+    /// the preserved mint backup, and the rolling-token flag together, so the
+    /// profile's stored OAuth login is what switches install again and
+    /// nothing re-creates a sidecar afterwards. The live credentials are
+    /// relinked when the profile is active, and the clear is refused when the
+    /// profile stores no other login.
+    #[command(name = "static-token")]
+    StaticToken {
+        /// Profile whose long-lived token to operate on.
+        profile: String,
+        /// Remove the long-lived token, its preserved mint backup, and the
+        /// rolling-token flag, instead of restoring the mint.
+        #[arg(long)]
+        clear: bool,
+        /// Skip `--clear`'s confirm prompt. Required on a non-TTY stdin.
+        #[arg(long, short = 'y', requires = "clear")]
+        yes: bool,
+    },
+
+    /// Restore a disabled profile to every operational surface
+    Enable {
+        /// Profile to re-enable.
+        profile: String,
+    },
+
+    /// Spend one of a codex account's banked usage-limit resets
+    ///
+    /// Reopens that account's usage windows now, the reset codex's own `/usage`
+    /// menu offers. Codex profiles only. Prompts `[y/N]` naming the reset it
+    /// will use (a `codex_rate_limits` reset first, then the one that expires
+    /// first) unless `--yes`, which a non-TTY run must pass: a used reset
+    /// cannot be given back. `--list` shows the account's resets and spends
+    /// nothing. Uses the profile's stored login as it stands and never
+    /// refreshes it.
+    #[command(name = "limit-reset")]
+    LimitReset {
+        /// Codex profile to reset.
+        profile: String,
+        /// Show the account's resets and which one would be used; spend none.
+        #[arg(long, conflicts_with = "yes")]
+        list: bool,
+        /// Skip the confirm prompt. Required on a non-TTY stdin.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Serve a profile's sessions a rolling token from its usage chain
+    ///
+    /// The daemon re-stamps `session-token.json` with the usage chain's current
+    /// access token: full scopes and the account's `subscriptionType`, but NO
+    /// refresh token. Sessions run bearers that unlock plan-gated models while
+    /// the rotating chain stays clauth-private.
+    ///
+    /// Needs the clauth daemon running: the bearer dies in hours, and the
+    /// daemon's scan is what re-stamps it before then.
+    #[command(name = "rolling-token")]
+    RollingToken {
+        /// Profile to arm.
+        profile: String,
+    },
+
+    /// Print the profile owning the loaded .credentials.json
+    ///
+    /// CLAUDE_CONFIG_DIR-aware; prints `unknown` when nothing matches.
+    Which {
+        /// Emit JSON instead of the plain name.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List accounts as a table with each profile's usage
+    ///
+    /// Reads the same on-disk usage caches `status --json` prints, so the
+    /// numbers match, and never fetches. The active profile is marked `*` and
+    /// always shown; disabled profiles are hidden unless `--all`/`--disabled`.
+    /// Codex accounts follow in their own section, the active one marked `*`
+    /// too; they have no disabled state, so `--all` does not change that section.
+    List {
+        /// Also list disabled profiles, hidden by default.
+        #[arg(long)]
+        all: bool,
+        /// Alias for --all.
+        #[arg(long)]
+        disabled: bool,
+    },
+
+    /// List the delegate jobs clauth is holding
+    ///
+    /// One row per record in ~/.clauth/jobs/: background runs still going,
+    /// blocking runs whose caller is still waiting, finished results nothing
+    /// has collected yet, and runs whose server died. Read-only — stopping one
+    /// is the `monitor` tool's job. An empty store exits 0.
+    Jobs {
+        /// Emit a stable newest-first JSON array instead of the table. The
+        /// field set is fixed; a figure the record does not have is null.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List Claude Code sessions as a table
+    ///
+    /// Exits 0 on success, 2 on a usage error, 1 on any other failure.
+    Sessions {
+        /// Emit a stable newest-first JSON array instead of the table. The field
+        /// set is fixed; `tokens` and `cost` are null without `--tokens`.
+        #[arg(long)]
+        json: bool,
+        /// Add each session's token total and cost. Reads every transcript in
+        /// full, so a large store takes a while; omitted, both stay blank.
+        #[arg(long)]
+        tokens: bool,
+    },
+
+    /// Switch the global account, or move a live session to another profile
+    ///
+    /// One name switches the global account: `clauth switch <name>` is the
+    /// bare `clauth <name>` act under its own verb, repointing the credentials
+    /// the global `claude` reads (a codex name moves the codex active marker
+    /// instead). Two names address a live session: `clauth switch <sid>
+    /// <profile>` records the profile as the session's intended member — the
+    /// same registry write the fallback chain's decider makes — and installs
+    /// nothing itself: the session's own executor performs the switch, or
+    /// refuses it with a logged reason (a member whose endpoint, key, or
+    /// models differ from the launch profile's is refused, exactly as the
+    /// chain's own moves are). The session picks the new account up at its
+    /// next request, never before it. For a session started with
+    /// --with-fallback, the chain's decider can supersede a manual intent on
+    /// its next tick. The sid is the `<pid>-<seq>` of a live
+    /// `clauth start` session, one row per session under
+    /// ~/.clauth/live_sessions/.
+    Switch {
+        /// Profile to switch the global account to, or a live session id.
+        name: String,
+        /// Profile to point the live session at — its presence is what makes
+        /// the two-name form the session form.
+        profile: Option<String>,
+    },
+
+    /// Resume a session under a chosen profile
+    ///
+    /// Prompts on a TTY, defaulting to the session's last-ran profile (the
+    /// active profile when that is unknown).
+    Resume {
+        /// Session id, or `latest`.
+        target: String,
+        /// Resume under this profile instead of prompting.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+
+    /// Print the resume command, workspace, and storage path for a session
+    ///
+    /// Never launches anything.
+    Info {
+        /// Session id, or `latest`.
+        target: String,
+    },
+
+    /// Run the headless scheduler with no TUI
+    ///
+    /// Refreshes usage, auto-switches on exhaustion, and writes
+    /// ~/.clauth/status.json. Exits at once when a daemon is already running.
+    /// `--listen` also serves the REST API to the devices `clauth devices`
+    /// pairs (see the Daemon wiki page); `--status` prints and exits without
+    /// running a scheduler.
+    Daemon {
+        /// Wait instead, and take over when the running daemon exits. For a
+        /// launchd/systemd unit paired with a manual run.
+        #[arg(long, conflicts_with_all = ["no_standby", "replace", "status"])]
+        standby: bool,
+        /// The default's explicit spelling, kept so a spawner or unit still
+        /// passing it behaves unchanged.
+        #[arg(long, conflicts_with_all = ["replace", "status"])]
+        no_standby: bool,
+        /// Terminate the running daemon and take over, for an in-place upgrade.
+        #[arg(long, conflicts_with = "status")]
+        replace: bool,
+        /// Print the running daemon, or exit 1 with no output when none is.
+        #[arg(long, conflicts_with = "listen")]
+        status: bool,
+        /// Also serve the REST API over TLS; bare --listen means 0.0.0.0:8443
+        ///
+        /// For running the daemon on one machine and a client (clauth-tray) on
+        /// another. TLS comes from this host's lego certificate — from
+        /// /etc/lego/certificates on macOS and Linux, and from
+        /// %AppData%\lego\certificates on Windows, either overridable in
+        /// ~/.clauth/tls.json. Every request but a pairing needs a paired
+        /// device's token; see `clauth devices`.
+        ///
+        /// The value-less spelling binds every interface, matching what the
+        /// flag is for — a client on another machine. It is the same exposure
+        /// the spelled-out form always had, just less to type; the flag itself
+        /// still has to be passed, so nothing listens by accident.
+        #[arg(
+            long,
+            value_name = "ADDR:PORT",
+            num_args = 0..=1,
+            default_missing_value = DEFAULT_LISTEN,
+        )]
+        listen: Option<SocketAddr>,
+        /// Serve this certificate instead of the host's lego certificate
+        ///
+        /// For hosts where the lego derivation cannot work rather than merely
+        /// points somewhere else: on a tailnet node `hostname -f` answers a name
+        /// no certificate covers, and `tailscale cert` writes a `<name>.crt` and
+        /// `<name>.key` with no issuer file and none of lego's naming.
+        ///
+        /// Both files are read as PEM. Given these, nothing else is consulted —
+        /// not `hostname -f`, not the directory in ~/.clauth/tls.json, and no
+        /// issuer file beside the certificate. Requires --key and --listen.
+        #[arg(long, value_name = "PATH", requires = "key", requires = "listen")]
+        cert: Option<PathBuf>,
+        /// The private key for --cert (PKCS#8, PKCS#1 or SEC1)
+        #[arg(long, value_name = "PATH", requires = "cert", requires = "listen")]
+        key: Option<PathBuf>,
+        /// Print the OpenAPI document the REST API serves, and start nothing.
+        #[arg(
+            long,
+            conflicts_with_all = [
+                "standby",
+                "no_standby",
+                "replace",
+                "status",
+                "listen",
+                "cert",
+                "key",
+            ]
+        )]
+        dump_openapi: bool,
+    },
+
+    /// Pair, list, grant sessions to, and revoke the devices that may call the
+    /// REST API
+    ///
+    /// Every `clauth daemon --listen` request but a pairing authenticates as
+    /// one named device, and each device holds a tier fixed here, on this
+    /// machine: `view` reads the status feed, `control` may also switch
+    /// accounts and, with the `sessions` grant, create sessions through the API
+    /// while `[serve] session_creation` is on.
+    /// Bare, it lists the devices. No token is ever printed back: clauth keeps
+    /// only a SHA-256 of each.
+    #[command(args_conflicts_with_subcommands = true)]
+    Devices {
+        /// Emit a JSON array instead of the table.
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        cmd: Option<DevicesCommand>,
+    },
+
+    /// Print the usage / auto-switch snapshot as JSON
+    ///
+    /// The same shape the daemon writes to ~/.clauth/status.json.
+    Status {
+        /// Required — status has no other output mode.
+        #[arg(long, required = true)]
+        json: bool,
+        /// Also list disabled profiles, hidden by default.
+        #[arg(long)]
+        all: bool,
+        /// Alias for --all.
+        #[arg(long)]
+        disabled: bool,
+    },
+
+    /// Run the stdio MCP server (claude code launches this)
+    Mcp,
+
+    /// Set the herdr plugin up, or take it back out
+    ///
+    /// `clauth herdr install` runs herdr's own installer, then adds the two
+    /// things a herdr plugin cannot declare for itself: the keybinding that
+    /// opens the dashboard, and the sidebar row that renders which account
+    /// each Claude Code pane burns. Both land in the user's herdr
+    /// `config.toml`, and herdr validates the result before it is written.
+    /// `clauth herdr uninstall` reverses both halves together.
+    Herdr {
+        #[command(subcommand)]
+        cmd: HerdrCommand,
+    },
+
+    /// Work with clauth-compatible proxies
+    ///
+    /// A clauth proxy is a separate `clauth-<service>-proxy` process that sits
+    /// between Claude Code and one inference provider and speaks the clauth
+    /// proxy contract.
+    Proxy {
+        #[command(subcommand)]
+        cmd: ProxyCommand,
+    },
+
+    /// Print a shell completion script, or install one
+    ///
+    /// `clauth completions <bash|zsh|fish>` prints the script to stdout.
+    /// `clauth completions install [shell]` writes it and wires it into the
+    /// user's shell rc, detecting the shell from $SHELL when omitted.
+    Completions {
+        /// `bash`, `zsh`, `fish`, or `install`.
+        #[arg(value_name = "SHELL|install")]
+        target: String,
+        /// With `install` only: which shell to install for.
+        shell: Option<String>,
+    },
+
+    /// Print one profile name per line, for the shell completion scripts;
+    /// `--live-sessions` prints the live-session registry's id stems instead,
+    /// for `clauth switch`'s first position.
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        /// The codex roster instead of the claude one (for `limit-reset`).
+        #[arg(long)]
+        codex: bool,
+        /// Print `~/.clauth/live_sessions/`'s file stems instead of profile
+        /// names.
+        #[arg(long = "live-sessions", hide = true)]
+        live_sessions: bool,
+    },
+
+    /// CC's `apiKeyHelper` body for an api-key profile: print the profile's
+    /// stored key to stdout so the runtime settings.json never holds it. The
+    /// command reads, never mints: every call prints the same static key from
+    /// `config.toml` until a re-login or the divergence adopt re-captures it,
+    /// so a copied value keeps working across any number of child sessions —
+    /// it is not single-use.
+    #[command(name = "__api-key", hide = true)]
+    ApiKey {
+        /// Profile whose stored key to print.
+        profile: String,
+    },
+
+    /// The bundled PostToolUse `asyncRewake` hook body: read the hook payload
+    /// on stdin, wait for a background delegate, and wake the model.
+    #[command(hide = true)]
+    McpAwaitJob,
+
+    /// The bundled UserPromptSubmit / PostToolUse / SessionStart hook body: read
+    /// the hook payload on stdin and tell the conversation when the account
+    /// behind it changed.
+    #[command(hide = true)]
+    HookProfileChangedNote,
+
+    /// The bundled SessionStart self-heal body: repair a broken plugin
+    /// registration through agentgear. Prints only when something changed, so a
+    /// healthy session start says nothing.
+    #[command(hide = true)]
+    SelfHeal,
+
+    /// Not a command. Kept only to redirect anyone who guesses it.
+    #[command(hide = true)]
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+
+    /// A bare word is a profile name: switch to it and exit (deprecated, use
+    /// `clauth switch <name>`). Declared last so every real subcommand above
+    /// shadows a same-named profile, which is the precedence the hand-rolled
+    /// dispatcher had.
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+/// `clauth start`'s flags, the profile, and the `claude` passthrough.
+#[derive(Args, Debug)]
+pub(crate) struct StartArgs {
+    /// Uses a clean throwaway runtime, without your CLAUDE.md, plugins, hooks,
+    /// skills, MCP servers or tools. Run it in a clean cwd for a blind session.
+    /// Useful for testing or benchmarking. Transcripts and session state are
+    /// lifted into the global store as clauth start shuts down, so the session
+    /// stays resumable and its tokens counted. A hard kill skips that.
+    #[arg(long)]
+    pub(crate) isolated: bool,
+    /// Follow the fallback chain, moving to the next account as each runs out
+    ///
+    /// The session starts on this profile and swaps onto the next chain member
+    /// when its window is spent, instead of stopping where the account does. If
+    /// a chain member is today's home account — the `preferred` flag, or a
+    /// `preferred_days` list naming today — the session also returns to it once
+    /// it reads clear and fresh again. Needs a running
+    /// `clauth daemon` to decide the switches, and a profile that is already a
+    /// chain member. Not available with --isolated, on a non-OAuth account,
+    /// or on a Windows host without symlink privilege — each of those is refused
+    /// by name at launch.
+    #[arg(long, conflicts_with = "isolated")]
+    pub(crate) with_fallback: bool,
+    /// Pick the account instead of naming one: the first fallback-chain member
+    /// with headroom for the models this session will run (`--model`, the model
+    /// in your settings, the subagent model).
+    ///
+    /// It takes the place of the profile name, so separate `claude`'s own args
+    /// with `--` whenever the first of them starts with a hyphen:
+    /// `clauth start --auto -- -p "hi"`. Without a name in that slot there is
+    /// nothing to tell a passthrough `-p` from a misspelled clauth flag, and
+    /// guessing would silently eat one of them.
+    #[arg(long)]
+    pub(crate) auto: bool,
+    /// Print the account a start would launch on, and why, without launching it.
+    #[arg(long)]
+    pub(crate) explain: bool,
+    /// Profile to launch under.
+    #[arg(required_unless_present = "auto")]
+    pub(crate) profile: Option<String>,
+    /// Args handed to `claude` verbatim.
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "CLAUDE_ARGS"
+    )]
+    pub(crate) claude_args: Vec<String>,
+}
+
+/// Which account a `clauth start` runs under: the name the operator typed, or
+/// the one the fallback-chain walk picks for the models the session may run.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StartTarget {
+    Named(String),
+    Auto,
+}
+
+impl StartArgs {
+    /// `--isolated` selects the throwaway store; without it the start shares
+    /// the profile's runtime tree.
+    pub(crate) fn isolation(&self) -> Isolation {
+        if self.isolated {
+            Isolation::Isolated
+        } else {
+            Isolation::Shared
+        }
+    }
+
+    /// The account to start on. `--auto` defers it to the fallback-chain walk;
+    /// without it the positional is required, so the `unwrap_or_default` is
+    /// unreachable rather than a fallback.
+    pub(crate) fn target(&self) -> StartTarget {
+        if self.auto {
+            StartTarget::Auto
+        } else {
+            StartTarget::Named(self.profile.clone().unwrap_or_default())
+        }
+    }
+
+    /// Args for `claude`.
+    ///
+    /// `--auto` leaves no profile to fill, but clap fills positionals in
+    /// declaration order and binds the first trailing value to that slot
+    /// anyway — so `clauth start --auto -- -p "hi"` parks `-p` in `profile` and
+    /// leaves `claude` a bare `hi`. Folding it back is what makes the `--`
+    /// spelling come out whole on the other side.
+    pub(crate) fn passthrough(&self) -> Vec<String> {
+        match (&self.profile, self.auto) {
+            (Some(first), true) => std::iter::once(first.clone())
+                .chain(self.claude_args.iter().cloned())
+                .collect(),
+            _ => self.claude_args.clone(),
+        }
+    }
+}
+
+/// `clauth login`'s profile plus its auth-method flags.
+///
+/// Capturing a long-lived token lives here as `--setup-token` because it IS a
+/// login; removing one is `clauth static-token <profile> --clear`, a verb rather
+/// than a flag, matching how `enable`/`disable` toggle per-profile state.
+#[derive(Args, Debug)]
+pub(crate) struct LoginArgs {
+    /// Profile to log in as. An existing name re-authenticates it in place.
+    pub(crate) profile: String,
+    /// API base url. Selects API-key mode.
+    #[arg(long, value_name = "URL")]
+    pub(crate) base_url: Option<String>,
+    /// API key. Selects API-key mode. Visible in shell history and process
+    /// listings, so prefer the echo-off prompt.
+    #[arg(long, value_name = "KEY")]
+    pub(crate) api_key: Option<String>,
+    /// Capture a `claude setup-token` mint into the profile's long-lived
+    /// session-token sidecar, pasted echo-off or piped on stdin. Takes effect
+    /// on the next switch and touches nothing else about the profile.
+    #[arg(long, conflicts_with_all = ["base_url", "api_key"])]
+    pub(crate) setup_token: bool,
+    /// Create (or re-authenticate) a CODEX profile instead, by adopting the
+    /// operator's own `codex login` out of ~/.codex/auth.json. The flag picks
+    /// which state file the profile lives in and appears only on this verb —
+    /// switch, delete, and start resolve bare names against both rosters.
+    #[arg(long, conflicts_with_all = ["base_url", "api_key", "setup_token", "model"])]
+    pub(crate) codex: bool,
+    /// With --codex: mint a FRESH codex chain via the browser instead of
+    /// adopting ~/.codex — a login clauth alone holds, leaving your own codex
+    /// untouched. Requires --codex.
+    #[arg(long, requires = "codex")]
+    pub(crate) browser: bool,
+    /// Replace an existing long-lived token unprompted.
+    #[arg(long, short = 'y', requires = "setup_token")]
+    pub(crate) yes: bool,
+    /// Default model for the profile: opus, sonnet, haiku, opusplan, or a full
+    /// model id.
+    #[arg(long, value_name = "ID")]
+    pub(crate) model: Option<String>,
+}
+
+/// `login` flags in completion order. The single source the bash/zsh/fish
+/// scripts in `completions.rs` splice in, so a new login flag is added here
+/// and nowhere else.
+pub(crate) const LOGIN_FLAGS: &[&str] = &[
+    "--base-url",
+    "--api-key",
+    "--setup-token",
+    "--codex",
+    "--browser",
+    "--yes",
+    "-y",
+    "--model",
+];
+
+impl LoginArgs {
+    /// API-key mode: capture a base_url + api_key pair instead of browser OAuth.
+    pub(crate) fn is_api_mode(&self) -> bool {
+        self.base_url.is_some() || self.api_key.is_some()
+    }
+}
+
+/// `clauth herdr <cmd>`: install and uninstall the plugin and its config wiring.
+#[derive(Subcommand, Debug)]
+pub(crate) enum HerdrCommand {
+    /// Install the plugin into herdr and wire it into herdr's own config
+    ///
+    /// herdr's installer prints every command the plugin would run as you and
+    /// asks before registering it; this passes that prompt straight through
+    /// rather than answering it. A plugin already linked from a local checkout
+    /// refuses the install: it names the tree and the two ways out.
+    Install {
+        /// Key that opens the dashboard, in herdr's own binding syntax
+        /// (`prefix+a`, `ctrl+alt+c`). Prompted for when omitted.
+        #[arg(long, value_name = "SPEC")]
+        key: Option<String>,
+        /// Install the plugin and leave herdr's config.toml untouched.
+        #[arg(long)]
+        no_config: bool,
+        /// Skip both confirm prompts, herdr's install preview included.
+        /// Required on a non-TTY stdin, which gets no prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Uninstall the plugin from herdr and drop the config clauth added
+    ///
+    /// Takes the keybinding and sidebar row `install` wrote back out of herdr's `config.toml`, leaving anything else in the file alone, then runs herdr's uninstall.
+    Uninstall {
+        /// Uninstall the plugin and leave herdr's config.toml untouched.
+        #[arg(long)]
+        no_config: bool,
+        /// Skip the confirm prompt. Required on a non-TTY stdin, which gets no prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Print one herdr knob for the plugin scripts
+    ///
+    /// `clauth herdr config get <key>` prints the knob's value on its own
+    /// line, shell-shaped (`fit|half|split-right|split-top`, `on|off`, or the
+    /// bare number).
+    /// Hidden from help: this is the scripts' read path, not a human surface.
+    #[command(hide = true)]
+    Config {
+        #[command(subcommand)]
+        cmd: HerdrConfigCommand,
+    },
+}
+
+/// `clauth proxy <cmd>`.
+#[derive(Subcommand, Debug)]
+pub(crate) enum ProxyCommand {
+    /// Show every clauth proxy on PATH or registered, with its live state
+    ///
+    /// One row per `clauth-<service>-proxy` binary on PATH or registered with
+    /// `clauth proxy enable`, joined with the running daemon's live state:
+    /// service, version, contract, enabled, port and state.
+    List {
+        /// Emit a stable array of objects instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Record a proxy found on PATH, for the daemon to run
+    ///
+    /// Reads `clauth-<service>-proxy manifest` and refuses a proxy speaking a
+    /// contract major clauth does not. The first enable picks a free loopback
+    /// port and mints the proxy's admin token; a later one keeps both, since
+    /// the proxy's profiles carry the port in their base_url.
+    Enable {
+        /// The proxy's service, the <service> in clauth-<service>-proxy.
+        service: String,
+        /// Loopback port to serve on, first enable only. Default: a free one.
+        #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
+        port: Option<u16>,
+    },
+
+    /// Stop running a proxy, keeping its port, admin token and state
+    ///
+    /// Its profiles work again after `clauth proxy enable`. Nothing is
+    /// deleted.
+    Disable {
+        /// The proxy's service, the <service> in clauth-<service>-proxy.
+        service: String,
+    },
+
+    /// Check a running proxy against the clauth proxy contract
+    ///
+    /// Drives every contract route and prints one line per departure (the
+    /// route, what the contract expects, what the proxy answered), exiting 1
+    /// when there is any. Safe on a live proxy: mutating routes are only aimed
+    /// at an account id no proxy holds, and the one login flow it starts is
+    /// cancelled. It does send one real inference request on the key's account.
+    Check {
+        /// The proxy's base URL, like http://127.0.0.1:9101, or the service of
+        /// a proxy registered with `clauth proxy enable`, like zcode.
+        target: String,
+        /// File holding the proxy's admin token, alone, readable by you only.
+        /// Required with a URL; a registered proxy's is read from clauth's own.
+        #[arg(long, value_name = "PATH")]
+        admin_token_file: Option<PathBuf>,
+        /// File holding an inference key of one of the proxy's accounts,
+        /// alone, readable by you only. Required with a URL; a registered
+        /// proxy's is the key of the one profile whose base_url is its bind.
+        #[arg(long, value_name = "PATH")]
+        key_file: Option<PathBuf>,
+        /// Also run the mutating routes for real on this account: change and
+        /// restore each setting it can, run each action, re-mint its key, then delete
+        /// it. Requires --key-file holding this account's key, in both forms:
+        /// a registered proxy's profile key is never used for it. Meant for a
+        /// proxy's CI against a stub upstream.
+        #[arg(long, value_name = "ACCOUNT")]
+        destructive: Option<String>,
+    },
+}
+
+/// `clauth herdr config <cmd>`: the plugin scripts' read path for the knobs
+/// persisted under `[herdr]` in profiles.toml.
+#[derive(Subcommand, Debug)]
+pub(crate) enum HerdrConfigCommand {
+    /// Print one knob's value on its own line
+    Get {
+        /// Knob name: popup_width, pane_tag, tag_watch_secs, border_label,
+        /// delegate_dot, delegate_row_text.
+        key: String,
+    },
+}
+
+/// `clauth devices <cmd>`: the ways a device joins, leaves, or gains the
+/// sessions grant.
+#[derive(Subcommand, Debug)]
+pub(crate) enum DevicesCommand {
+    /// Print a one-time pairing code and wait until a device redeems it
+    ///
+    /// The code is 8 characters, valid for 5 minutes, used once, and dropped
+    /// after 5 wrong tries; a new `pair` replaces a code still waiting. The
+    /// device posts it to `POST /api/v1/pair` on this host's
+    /// `clauth daemon --listen` and gets its token in the answer. The code
+    /// prints alone on stdout and the wait reports on stderr; Ctrl-C withdraws
+    /// the code if it is still waiting.
+    Pair {
+        /// Name for the device: letters, digits and - _ . @ +.
+        name: String,
+        /// Pair it with control, which can switch accounts rather than only
+        /// read. Until the code is used, whoever enters it first gets control.
+        #[arg(long)]
+        control: bool,
+        /// Let the paired device mint sessions through the API. Requires
+        /// --control: a view device cannot mint sessions.
+        #[arg(long, requires = "control")]
+        sessions: bool,
+    },
+
+    /// Mint a token for a device on this machine and print it once
+    ///
+    /// For a client configured by hand. The token prints alone on stdout;
+    /// clauth keeps only its SHA-256 and cannot show it again.
+    Add {
+        /// Name for the device: letters, digits and - _ . @ +.
+        name: String,
+        /// Mint it with control, which can switch accounts rather than only
+        /// read.
+        #[arg(long)]
+        control: bool,
+        /// Let the added device mint sessions through the API. Requires
+        /// --control: a view device cannot mint sessions.
+        #[arg(long, requires = "control")]
+        sessions: bool,
+    },
+
+    /// Remove a device; its next request is refused
+    Revoke {
+        /// Device to remove.
+        name: String,
+    },
+
+    /// Grant a control device the sessions flag
+    AllowSessions {
+        /// Device to grant. Must be a control device; revoke and re-pair with
+        /// --control to change a view device.
+        name: String,
+    },
+}
