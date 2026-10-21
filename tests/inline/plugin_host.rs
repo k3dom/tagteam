@@ -1,0 +1,950 @@
+//! Inline tests for `plugin_host`. No environment needed: these pin the
+//! compile-time wiring (derive metadata, the embedded tree), the committed
+//! SessionStart hook that points at `clauth self-heal`, the PostToolUse
+//! await-job hook's matcher and wake summary, and the `clauth start`
+//! pre-flight gate's registry shapes. The lifecycle itself (the real `claude`
+//! CLI as transaction boundary) is pinned hermetically by the fake-claude
+//! install test in `tui_app.rs` and exercised for real in the scratch-profile
+//! verifies.
+
+use super::ClauthPlugin;
+use agentgear::PluginHost;
+
+/// The derive and the one-line `build.rs` are the whole of the agentgear
+/// wiring; if either silently broke (name drift, a version guard that stopped
+/// pinning, an embed that stopped baking the tree), these fail without
+/// spawning the binary.
+#[test]
+fn derive_metadata_is_wired() {
+    assert_eq!(ClauthPlugin::NAME, "clauth");
+    assert_eq!(ClauthPlugin::MARKETPLACE, "clauth");
+    assert_eq!(ClauthPlugin::AGENTS, &["claude"]);
+    // build.rs pins plugins/.claude-plugin/plugin.json `version` to this, so
+    // the const equals the crate version.
+    assert_eq!(ClauthPlugin::VERSION, env!("CARGO_PKG_VERSION"));
+
+    let descriptor = ClauthPlugin::descriptor();
+    assert_eq!(descriptor.name, "clauth");
+    assert_eq!(descriptor.id(), "clauth@clauth");
+    assert_eq!(descriptor.version, env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn embedded_tree_is_baked_in() {
+    // The `embed` feature compresses `plugins/` into the binary; an empty blob
+    // would mean `install(Scope::User, Source::Embedded)` errors at
+    // materialize instead of installing.
+    assert!(
+        !ClauthPlugin::embedded_blob().is_empty(),
+        "the plugin tree was not embedded"
+    );
+}
+
+/// The delegate hook's wake-notification title: the bundled manifest names the
+/// event in `rewakeSummary` instead of letting the host render its internal
+/// "Stop hook feedback" placeholder, which reads as an empty notification. The
+/// value must stay true for BOTH exit-2 shapes the hook produces — a delivered
+/// fan-out and a mixed one with jobs still running — so a copy that claims
+/// readiness for the whole set ("result ready") contradicts the still-running
+/// clause the body prints. Pinned as a literal so a manifest edit cannot drift
+/// the summary without redding here.
+#[test]
+fn the_delegate_hook_names_its_wake_summary_instead_of_the_host_placeholder() {
+    let hooks: serde_json::Value =
+        serde_json::from_str(include_str!("../../plugins/hooks/hooks.json"))
+            .expect("plugins/hooks/hooks.json parses");
+    let (_, entry) = await_job_hook(&hooks);
+    assert_eq!(
+        entry["rewakeSummary"], "clauth delegate results",
+        "the manifest names the wake notification instead of the host's placeholder"
+    );
+    assert_ne!(
+        entry["rewakeSummary"], "Stop hook feedback",
+        "the host's internal placeholder must never be the shipped summary"
+    );
+}
+
+/// The `PostToolUse` group and hook entry running `clauth mcp-await-job`,
+/// found by its command so a matcher edit cannot hide them from the tests
+/// pinning them. Counted over every `PostToolUse` entry: a second copy there
+/// would spawn the hook on calls no test covers.
+fn await_job_hook(hooks: &serde_json::Value) -> (&serde_json::Value, &serde_json::Value) {
+    let found: Vec<(&serde_json::Value, &serde_json::Value)> = hooks["hooks"]["PostToolUse"]
+        .as_array()
+        .expect("PostToolUse is an array")
+        .iter()
+        .flat_map(|group| {
+            group["hooks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |entry| (group, entry))
+        })
+        .filter(|(_, entry)| entry["command"] == "clauth mcp-await-job")
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "exactly one PostToolUse hook runs `clauth mcp-await-job`"
+    );
+    found[0]
+}
+
+/// A session reaches `delegate` under the plugin's server name, or under the
+/// bare `clauth` server name when a user-scope `clauth` MCP server suppresses
+/// the plugin's; a backgrounded result reaches a stopped session unprompted
+/// only through this hook, so the matcher must take both names and nothing
+/// else. The host tests this matcher as an unanchored JS regex, and the
+/// literal is pinned by equality because the `regex` crate stands in for that
+/// engine below: a respelling must first re-establish that both read it alike.
+#[test]
+fn the_await_job_hook_matches_delegate_under_both_server_names() {
+    let hooks: serde_json::Value =
+        serde_json::from_str(include_str!("../../plugins/hooks/hooks.json"))
+            .expect("plugins/hooks/hooks.json parses");
+    let matcher = await_job_hook(&hooks).0["matcher"]
+        .as_str()
+        .expect("the await-job group carries a matcher");
+    assert_eq!(
+        matcher, "^mcp__(plugin_clauth_)?clauth__delegate$",
+        "respelling the await-job matcher: re-check that JS RegExp and the regex crate read it \
+         alike, then update this literal"
+    );
+    let matcher = regex::Regex::new(matcher).expect("the matcher compiles as a regex");
+    for tool in [
+        "mcp__plugin_clauth_clauth__delegate",
+        "mcp__clauth__delegate",
+    ] {
+        assert!(matcher.is_match(tool), "{tool:?} must wake on its result");
+    }
+    for tool in [
+        "mcp__clauth__monitor",
+        "mcp__plugin_clauth_clauth__monitor",
+        "mcp__clauth__profiles",
+        "mcp__clauth__switch_profile",
+        "mcp__clauth__delegates",
+        "mcp__notclauth__delegate",
+        "mcp__plugin_other_clauth__delegate",
+        "mcp__foo_mcp__clauth__delegate",
+    ] {
+        assert!(!matcher.is_match(tool), "{tool:?} must not run the hook");
+    }
+}
+
+/// The SessionStart wiring the self-heal rides on: the committed hooks.json
+/// must carry BOTH hooks — the profile-change note keeps working, and the new
+/// self-heal entry points at the hidden `clauth self-heal` subcommand. A drift
+/// here (someone edits hooks.json and drops one command) silently disables a
+/// session behavior, which is exactly what this test exists to catch.
+#[test]
+fn session_start_hook_wires_self_heal_beside_the_note() {
+    let hooks: serde_json::Value =
+        serde_json::from_str(include_str!("../../plugins/hooks/hooks.json"))
+            .expect("plugins/hooks/hooks.json parses");
+    let commands: Vec<String> = hooks["hooks"]["SessionStart"]
+        .as_array()
+        .expect("SessionStart is an array")
+        .iter()
+        .filter_map(|group| group["hooks"].as_array())
+        .flatten()
+        .filter_map(|hook| hook["command"].as_str())
+        .map(str::to_string)
+        .collect();
+    assert!(
+        commands
+            .iter()
+            .any(|c| c == "clauth hook-profile-changed-note"),
+        "the profile-change note must keep its SessionStart slot: {commands:?}"
+    );
+    assert!(
+        commands.iter().any(|c| c == "clauth self-heal"),
+        "the self-heal hook is not wired into SessionStart: {commands:?}"
+    );
+}
+
+/// The hook's output contract: a line appears only when the heal changed
+/// something. Healthy means silent — the planted `if true` mutation that made
+/// every heal print reds here — and a real transition (a stale marker cleared
+/// after the registration vanished) prints exactly once, in the hook's own
+/// wording. Runs hermetically through the fake-`claude` harness in
+/// `testutil`.
+#[cfg(unix)]
+#[test]
+fn self_heal_says_nothing_when_healthy_and_reports_changes() {
+    use crate::testutil::{ConfigDirSandbox, FakeClaude, HomeSandbox};
+
+    let home = HomeSandbox::new();
+    let config = home.home().join(".claude-config");
+    std::fs::create_dir_all(&config).expect("config dir");
+    let _config = ConfigDirSandbox::new(&home, &config);
+    let fake = FakeClaude::new(&home);
+
+    // A fresh install through the same host the TUI fix calls: registry entry
+    // present, marker stamped.
+    assert!(
+        matches!(
+            super::install().expect("install"),
+            agentgear::Outcome::Installed
+        ),
+        "the fixture install must land"
+    );
+
+    // Healthy + marker present: nothing to say.
+    assert_eq!(
+        super::self_heal_line().expect("heal"),
+        None,
+        "a healthy install prints nothing"
+    );
+
+    // The registration's backing vanishes (registry entry + shim state), the
+    // marker stays: the heal clears the stale marker and says so once.
+    std::fs::remove_file(config.join("plugins").join("installed_plugins.json"))
+        .expect("remove registry");
+    std::fs::remove_file(std::env::var_os("CLAUDE_SHIM_STATE").expect("shim state pin"))
+        .expect("remove shim state");
+    assert_eq!(
+        super::self_heal_line().expect("heal"),
+        Some("clauth self-heal: cleared stale marker".to_string()),
+        "a heal that changed something says so, in the hook's own wording"
+    );
+
+    // Marker cleared + nothing registered: silent again.
+    assert_eq!(
+        super::self_heal_line().expect("heal"),
+        None,
+        "after the clear there is nothing left to say"
+    );
+    let _ = &fake;
+}
+
+// ── the start pre-flight gate ─────────────────────────────────────────────
+
+/// One gate fixture: the env harness comes up FIRST (so `expected_pointer`
+/// resolves inside the sandbox), the seed closure builds the registry pair
+/// against the sandbox's config dir and pointer, then the verdict runs. The
+/// gate itself never spawns; the shim is never called.
+#[cfg(unix)]
+fn gate_verdict(
+    seed: impl FnOnce(&std::path::Path, &std::path::Path) -> (serde_json::Value, serde_json::Value),
+) -> bool {
+    use crate::testutil::{ConfigDirSandbox, FakeClaude, HomeSandbox};
+
+    let home = HomeSandbox::new();
+    let claude = home.home().join(".claude-config");
+    std::fs::create_dir_all(&claude).expect("config dir");
+    let _config = ConfigDirSandbox::new(&home, &claude);
+    let _fake = FakeClaude::new(&home);
+    let expected = super::expected_pointer().expect("pointer");
+    let (marketplaces, plugins) = seed(&claude, &expected);
+    let dir = claude.join("plugins");
+    std::fs::create_dir_all(&dir).expect("plugins dir");
+    for (name, value) in [
+        ("known_marketplaces.json", &marketplaces),
+        ("installed_plugins.json", &plugins),
+    ] {
+        std::fs::write(
+            dir.join(name),
+            serde_json::to_vec_pretty(value).expect("seed json"),
+        )
+        .expect("seed registry");
+    }
+    super::preflight_gate()
+}
+
+/// The healthy pair: a directory-source `clauth` entry registered exactly at
+/// the materialized pointer (created on disk, manifest included) plus a
+/// user-scope plugin entry whose files resolve. Every shape test below breaks
+/// exactly one half of this and keeps the other.
+#[cfg(unix)]
+fn healthy_registry(
+    _claude: &std::path::Path,
+    expected: &std::path::Path,
+) -> (serde_json::Value, serde_json::Value) {
+    std::fs::create_dir_all(expected.join(".claude-plugin")).expect("pointer tree");
+    std::fs::write(
+        expected.join(".claude-plugin").join("marketplace.json"),
+        "{}",
+    )
+    .expect("manifest");
+    let path = expected.to_string_lossy().into_owned();
+    (
+        serde_json::json!({
+            "clauth": {
+                "source": {"source": "directory", "path": path},
+                "installLocation": path,
+                "lastUpdated": "2026-08-26T00:00:00.000Z"
+            }
+        }),
+        serde_json::json!({
+            "version": 2,
+            "plugins": {"clauth@clauth": [{"scope": "user", "installPath": path, "version": "0.14.1"}]}
+        }),
+    )
+}
+
+/// The decision's own pin: a healthy registration costs a start no heal, which
+/// is what keeps the pre-flight spawn-free on the common path.
+#[cfg(unix)]
+#[test]
+fn preflight_gate_stays_shut_on_a_healthy_registration() {
+    let verdict = gate_verdict(healthy_registry);
+    assert!(
+        !verdict,
+        "a registration at the materialized pointer with its manifest present must not heal"
+    );
+}
+
+/// Every shape the gate exists to catch, one break at a time from the healthy
+/// twin: marketplace absent, github-sourced, path diverged, path missing,
+/// manifest deleted, plugin installPath dead, plugin entry carrying load errors.
+/// Each is the deadlock half of the migration — the plugin then loads 0 hooks
+/// and the hook-side heal never fires.
+#[cfg(unix)]
+#[test]
+fn preflight_gate_fires_on_every_broken_or_divergent_shape() {
+    let broken = tempfile::tempdir().expect("tempdir");
+    let broken_path = broken.path().join("registered");
+    std::fs::create_dir_all(broken_path.join(".claude-plugin")).expect("broken dir");
+    let broken_path = broken_path.to_string_lossy().into_owned();
+    let healthy_plugins =
+        |claude: &std::path::Path, expected: &std::path::Path| healthy_registry(claude, expected).1;
+    let healthy_mkt =
+        |claude: &std::path::Path, expected: &std::path::Path| healthy_registry(claude, expected).0;
+    type Seed =
+        Box<dyn Fn(&std::path::Path, &std::path::Path) -> (serde_json::Value, serde_json::Value)>;
+    let cases: Vec<(&str, Seed)> = vec![
+        (
+            "marketplace entry absent",
+            Box::new(move |claude, expected| {
+                (serde_json::json!({}), healthy_plugins(claude, expected))
+            }),
+        ),
+        (
+            "marketplace entry github-sourced",
+            Box::new(move |claude, expected| {
+                (
+                    serde_json::json!({"clauth": {"source": {"source": "github", "repo": "uwuclxdy/clauth"}}}),
+                    healthy_plugins(claude, expected),
+                )
+            }),
+        ),
+        (
+            "marketplace path diverged from the pointer",
+            Box::new(move |claude, expected| {
+                (
+                    serde_json::json!({"clauth": {"source": {"source": "directory", "path": "/old/checkout/plugins"}}}),
+                    healthy_plugins(claude, expected),
+                )
+            }),
+        ),
+        (
+            "marketplace path missing",
+            Box::new(move |claude, expected| {
+                (
+                    serde_json::json!({"clauth": {"source": {"source": "directory"}}}),
+                    healthy_plugins(claude, expected),
+                )
+            }),
+        ),
+        (
+            "marketplace manifest deleted",
+            Box::new(move |claude, expected| {
+                (
+                    serde_json::json!({"clauth": {"source": {"source": "directory", "path": broken_path.clone()}}}),
+                    healthy_plugins(claude, expected),
+                )
+            }),
+        ),
+        (
+            "plugin entry installPath dead",
+            Box::new(move |claude, expected| {
+                (
+                    healthy_mkt(claude, expected),
+                    serde_json::json!({"version": 2, "plugins": {"clauth@clauth": [{"scope": "user", "installPath": "/gone/runtime/plugins/cache"}]}}),
+                )
+            }),
+        ),
+        (
+            "plugin entry carries load errors",
+            Box::new(move |claude, expected| {
+                let healthy_mkt = healthy_mkt(claude, expected);
+                let healthy_path = healthy_mkt["clauth"]["source"]["path"]
+                    .as_str()
+                    .expect("path")
+                    .to_string();
+                (
+                    healthy_mkt,
+                    serde_json::json!({
+                        "version": 2,
+                        "plugins": {"clauth@clauth": [{"scope": "user", "installPath": healthy_path, "errors": ["Marketplace clauth failed to load: cache-miss"]}]}
+                    }),
+                )
+            }),
+        ),
+    ];
+    for (name, seed) in cases {
+        assert!(gate_verdict(seed), "{name} must trip the gate");
+    }
+}
+
+/// A project-scope entry never trips the gate: the heal is user-scope and
+/// cannot fix it, so counting it would churn one heal per start for nothing.
+#[cfg(unix)]
+#[test]
+fn preflight_gate_ignores_project_scope_entries() {
+    let verdict = gate_verdict(|claude, expected| {
+        let (marketplaces, _) = healthy_registry(claude, expected);
+        let plugins = serde_json::json!({
+            "version": 2,
+            "plugins": {"clauth@clauth": [{"scope": "project", "installPath": "/gone/runtime/plugins/cache"}]}
+        });
+        (marketplaces, plugins)
+    });
+    assert!(
+        !verdict,
+        "a dead project entry is not the user-scope heal's job"
+    );
+}
+
+/// ABSENT registry files are the never-installed box, not "cannot tell": a
+/// config dir that has never held a plugin has no `plugins/` directory at all,
+/// so a gate keyed only on "parses, names nothing" would heal for exactly the
+/// population the carve-out exists for. agentgear converges nothing there (no
+/// marker, no entry), so the spawn buys a session-boot cost and no repair.
+#[cfg(unix)]
+#[test]
+fn preflight_gate_stays_shut_when_the_registry_files_are_absent() {
+    use crate::testutil::{ConfigDirSandbox, FakeClaude, HomeSandbox};
+
+    let home = HomeSandbox::new();
+    let claude = home.home().join(".claude-config");
+    std::fs::create_dir_all(&claude).expect("config dir");
+    let _config = ConfigDirSandbox::new(&home, &claude);
+    let _fake = FakeClaude::new(&home);
+    assert!(
+        !super::preflight_gate(),
+        "no plugins dir at all is a never-installed box, not a broken one"
+    );
+}
+
+/// UNREADABLE is the other verdict and keeps healing: a truncated or
+/// permission-denied registry says only that this pass cannot tell, and the heal
+/// is idempotent. The pair is what makes the absent case above safe to carve out.
+#[cfg(unix)]
+#[test]
+fn preflight_gate_heals_when_a_registry_file_is_unparseable() {
+    use crate::testutil::{ConfigDirSandbox, FakeClaude, HomeSandbox};
+
+    let home = HomeSandbox::new();
+    let claude = home.home().join(".claude-config");
+    std::fs::create_dir_all(&claude).expect("config dir");
+    let _config = ConfigDirSandbox::new(&home, &claude);
+    let _fake = FakeClaude::new(&home);
+    let dir = claude.join("plugins");
+    std::fs::create_dir_all(&dir).expect("plugins dir");
+    std::fs::write(dir.join("known_marketplaces.json"), "{\"clauth\":").expect("truncated");
+    std::fs::write(dir.join("installed_plugins.json"), "{}").expect("installed");
+    assert!(
+        super::preflight_gate(),
+        "a registry file this pass cannot parse must heal, conservatively"
+    );
+}
+
+// ── the detached heal ──────────────────────────────────────────────────────
+
+/// The migration's own first-run gate: a box that never installed the plugin
+/// (both registry files parse, neither names `clauth`) must read "nothing to
+/// heal", not "heal". A false positive here makes every `clauth mcp` boot and
+/// daemon tick spawn `claude plugin list --json` for nothing.
+#[cfg(unix)]
+#[test]
+fn preflight_gate_stays_shut_when_nothing_of_ours_is_registered() {
+    let verdict = gate_verdict(|_claude, _expected| {
+        (
+            serde_json::json!({"other": {"source": {"source": "github", "repo": "x/y"}}}),
+            serde_json::json!({"version": 2, "plugins": {"other@other": [{"scope": "user"}]}}),
+        )
+    });
+    assert!(
+        !verdict,
+        "no clauth marketplace + no clauth@clauth row must not heal"
+    );
+}
+
+/// The detached heal's "only when the gate says heal" half: a healthy
+/// registration makes `heal_detached()` a no-op that spawns no `claude`. This is
+/// the shape `clauth mcp` and the daemon hit on a working box.
+#[cfg(unix)]
+#[test]
+fn heal_detached_skips_when_the_gate_says_healthy() {
+    use crate::testutil::{ConfigDirSandbox, FakeClaude, HomeSandbox, join_background_tasks};
+
+    // Without this the throttle any earlier test in the process stamped refuses
+    // the heal on its own, and the assertion below goes green over a gate that
+    // spawns on every call. Tests share one process under `cargo test`.
+    let home = HomeSandbox::new();
+    super::reset_heal_throttle_for_test();
+    let config = home.home().join(".claude-config");
+    std::fs::create_dir_all(&config).expect("config dir");
+    let _config = ConfigDirSandbox::new(&home, &config);
+    let fake = FakeClaude::new(&home);
+
+    let expected = super::expected_pointer().expect("pointer");
+    let (marketplaces, plugins) = healthy_registry(&config, &expected);
+    let dir = config.join("plugins");
+    std::fs::create_dir_all(&dir).expect("plugins dir");
+    for (name, value) in [
+        ("known_marketplaces.json", &marketplaces),
+        ("installed_plugins.json", &plugins),
+    ] {
+        std::fs::write(
+            dir.join(name),
+            serde_json::to_vec_pretty(value).expect("seed json"),
+        )
+        .expect("seed registry");
+    }
+
+    super::heal_detached();
+    join_background_tasks();
+    assert!(
+        fake.log().is_empty(),
+        "a healthy registration must spawn no claude, got:\n{}",
+        fake.log()
+    );
+}
+
+/// The throttle the detached heal holds so no call site can forget it: one heal
+/// may run, and a fresh attempt is refused within the 30-minute floor whether the
+/// attempt succeeded or failed. The spawn decision is synchronous (the atomics
+/// are set on the calling thread before any worker spawns), so pinning the
+/// timestamps is deterministic. The shim log is the second half: it reds if the
+/// worker stops reaching the heal at all, which a timestamp assertion alone
+/// cannot see.
+#[cfg(unix)]
+#[test]
+fn heal_detached_throttles_to_one_heal_per_window() {
+    use std::sync::atomic::Ordering;
+
+    use crate::testutil::{ConfigDirSandbox, FakeClaude, HomeSandbox, join_background_tasks};
+
+    let home = HomeSandbox::new();
+    super::reset_heal_throttle_for_test();
+    let config = home.home().join(".claude-config");
+    std::fs::create_dir_all(&config).expect("config dir");
+    let _config = ConfigDirSandbox::new(&home, &config);
+    // The worker shells out for real, so the fake `claude` must be on `PATH`
+    // before the spawn — without it the heal reaches the operator's own binary.
+    let fake = FakeClaude::new(&home);
+
+    // Broken: a user-scope row whose installPath is gone, so the gate says heal.
+    let dir = config.join("plugins");
+    std::fs::create_dir_all(&dir).expect("plugins dir");
+    std::fs::write(dir.join("known_marketplaces.json"), "{}").expect("marketplaces");
+    std::fs::write(
+        dir.join("installed_plugins.json"),
+        serde_json::to_vec(
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {"clauth@clauth": [{"scope": "user", "installPath": "/gone/runtime/plugins/cache"}]}
+            }),
+        )
+        .expect("seed json"),
+    )
+    .expect("installed");
+
+    // First attempt: the spawn path is entered, so the floor timestamp advances.
+    super::heal_detached();
+    assert!(
+        super::HEAL_THROTTLE.last_start_ms.load(Ordering::Relaxed) > 0,
+        "the first heal must enter the spawn path"
+    );
+    join_background_tasks();
+    let first_start = super::HEAL_THROTTLE.last_start_ms.load(Ordering::Relaxed);
+    let after_first = fake.log();
+    assert!(
+        !after_first.is_empty(),
+        "the worker must actually reach the heal and spawn `claude`"
+    );
+    // Advance past the millisecond resolution of `now_ms` so a broken floor
+    // (which would re-stamp the timestamp) can't hide behind a same-ms collision.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    // A fresh attempt within the window is refused before spawning: the floor
+    // timestamp does not advance.
+    super::heal_detached();
+    assert_eq!(
+        super::HEAL_THROTTLE.last_start_ms.load(Ordering::Relaxed),
+        first_start,
+        "the 30-minute floor must refuse a fresh attempt"
+    );
+    join_background_tasks();
+    assert_eq!(
+        fake.log(),
+        after_first,
+        "a refused attempt must spawn nothing, got:\n{}",
+        fake.log()
+    );
+
+    // An in-flight heal also refuses. The floor is CLEARED first, so the flag is
+    // the only guard left standing: with the floor still armed, disabling the
+    // swap changes nothing and this block pins nothing.
+    super::HEAL_THROTTLE
+        .last_start_ms
+        .store(0, Ordering::Relaxed);
+    super::HEAL_THROTTLE
+        .in_flight
+        .store(true, Ordering::Release);
+    super::heal_detached();
+    assert_eq!(
+        super::HEAL_THROTTLE.last_start_ms.load(Ordering::Relaxed),
+        0,
+        "an in-flight heal must refuse before it stamps the floor"
+    );
+    join_background_tasks();
+    assert_eq!(
+        fake.log(),
+        after_first,
+        "an in-flight heal must spawn nothing, got:\n{}",
+        fake.log()
+    );
+    super::HEAL_THROTTLE
+        .in_flight
+        .store(false, Ordering::Release);
+}
+
+/// The reset mutates process-global statics that serialize on
+/// `HOME_TEST_LOCK`, so it must refuse to run with no sandbox held.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+#[should_panic(expected = "call under a `HomeSandbox`")]
+fn reset_heal_throttle_without_a_sandbox_panics() {
+    super::reset_heal_throttle_for_test();
+}
+
+/// The committed root marketplace manifest must stay agentgear-conformant, or a
+/// directory-source install silently drifts. The marketplace name is the install
+/// key, the single entry's `source` names the embedded tree, and — agentgear
+/// versioning rule 1 — a marketplace entry must NOT carry its own `version`
+/// (that would mask drift in `plugins/.claude-plugin/plugin.json`, the one
+/// version that must equal the crate).
+#[test]
+fn committed_root_marketplace_matches_agentgear_rules() {
+    let marketplace: serde_json::Value =
+        serde_json::from_str(include_str!("../../.claude-plugin/marketplace.json"))
+            .expect("marketplace.json parses");
+    assert_eq!(marketplace["name"].as_str(), Some("clauth"));
+    let plugins = marketplace["plugins"]
+        .as_array()
+        .expect("plugins is an array");
+    assert_eq!(plugins.len(), 1, "exactly one marketplace entry");
+    let entry = &plugins[0];
+    assert_eq!(entry["name"].as_str(), Some("clauth"));
+    assert_eq!(entry["source"].as_str(), Some("./plugins"));
+    assert!(
+        entry.get("version").is_none(),
+        "a marketplace-entry version would mask drift (agentgear versioning rule 1)"
+    );
+
+    let plugin: serde_json::Value =
+        serde_json::from_str(include_str!("../../plugins/.claude-plugin/plugin.json"))
+            .expect("plugin.json parses");
+    assert_eq!(plugin["name"].as_str(), Some("clauth"));
+    assert_eq!(plugin["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+}
+
+// ── the installPath convergence leg ────────────────────────────────────────
+
+/// The auto-fix's acceptance shape, pinned: plant two runtime-prefixed
+/// installPaths, one with a `~/.claude/plugins/cache/` twin and one without;
+/// the pass reads the first as its twin, names the second, leaves a
+/// still-resolving path alone, and never reformats the file.
+#[test]
+fn repoint_registry_reroots_a_dead_path_and_names_a_missing_twin() {
+    use crate::testutil::HomeSandbox;
+
+    let home = HomeSandbox::new();
+    let claude = home.home().join(".claude");
+    let clauth = home.home().join(".clauth");
+
+    // The twin of the first recorded path exists; the second's does not. The
+    // joins are component-wise, matching the product's per-component twin
+    // build, so fixture and product spellings are byte-equal on every
+    // platform — a one-string join with a mixed-separator suffix renders
+    // differently on windows and breaks the byte compare.
+    let twin = claude
+        .join("plugins")
+        .join("cache")
+        .join("agenticat")
+        .join("agents")
+        .join("a6261ea74c14");
+    std::fs::create_dir_all(&twin).expect("twin dir");
+
+    let dead = format!(
+        "{}/D0/runtime-700698-0/plugins/cache/agenticat/agents/a6261ea74c14",
+        clauth.join("profiles").display()
+    );
+    let missing = format!(
+        "{}/D0/runtime-672416-5/plugins/cache/claude-plugins-official/security-guidance/2.0.8",
+        clauth.join("profiles").display()
+    );
+    // A live tree still resolves its recorded path: left alone today, it
+    // converges the day the tree dies.
+    let live = format!(
+        "{}/D0/runtime-9-0/plugins/cache/live/1",
+        clauth.join("profiles").display()
+    );
+    std::fs::create_dir_all(clauth.join("profiles/D0/runtime-9-0/plugins/cache/live/1"))
+        .expect("live tree");
+
+    let original = format!(
+        "{{\n  \"version\": 2,\n  \"plugins\": {{\n    \"agents@agenticat\": [\n      {{ \"scope\": \"user\", \"installPath\": \"{dead}\" }}\n    ],\n    \"security-guidance@claude-plugins-official\": [\n      {{ \"scope\": \"user\", \"installPath\": \"{missing}\" }}\n    ],\n    \"live@live\": [\n      {{ \"scope\": \"user\", \"installPath\": \"{live}\" }}\n    ]\n  }}\n}}\n"
+    );
+    let registry = claude.join("plugins").join("installed_plugins.json");
+    std::fs::create_dir_all(registry.parent().unwrap()).expect("plugins dir");
+    std::fs::write(&registry, &original).expect("registry");
+
+    let outcome = super::repoint_registry().expect("repoint");
+    assert!(outcome.changed, "a rewrite counts as a change");
+    let line = outcome.line.expect("a change reports");
+
+    let twin_str = twin.display().to_string();
+    assert!(
+        line.contains("re-pointed") && line.contains(&twin_str),
+        "the rewrite is named: {line}"
+    );
+    assert!(
+        line.contains("left") && line.contains("no twin"),
+        "the missing twin is named: {line}"
+    );
+    assert!(
+        !line.contains("live/1"),
+        "a still-resolving path is neither rewritten nor named: {line}"
+    );
+    let expected = original.replace(&dead, &twin_str);
+    assert_eq!(
+        std::fs::read_to_string(&registry).unwrap(),
+        expected,
+        "only the dead path's value changes; formatting and every other byte survive"
+    );
+}
+
+/// A skip-only registry still names the unconverged path: "names each one it
+/// cannot" holds even when nothing was rewritten, and the naming does not
+/// count as a change (no bytes moved).
+#[test]
+fn repoint_registry_names_a_skip_only_pass() {
+    use crate::testutil::HomeSandbox;
+
+    let home = HomeSandbox::new();
+    let claude = home.home().join(".claude");
+    let clauth = home.home().join(".clauth");
+
+    let missing = format!(
+        "{}/D0/runtime-672416-5/plugins/cache/claude-plugins-official/security-guidance/2.0.8",
+        clauth.join("profiles").display()
+    );
+    let original = format!(
+        "{{\n  \"version\": 2,\n  \"plugins\": {{\n    \"security-guidance@claude-plugins-official\": [\n      {{ \"scope\": \"user\", \"installPath\": \"{missing}\" }}\n    ]\n  }}\n}}\n"
+    );
+    let registry = claude.join("plugins/installed_plugins.json");
+    std::fs::create_dir_all(registry.parent().unwrap()).expect("plugins dir");
+    std::fs::write(&registry, &original).expect("registry");
+    let before = std::fs::metadata(&registry).unwrap().modified().unwrap();
+
+    let outcome = super::repoint_registry().expect("repoint");
+    assert!(
+        !outcome.changed,
+        "a skip moves no bytes and is not a change"
+    );
+    let line = outcome.line.expect("the skip names itself");
+    assert!(
+        line.contains("left") && line.contains("no twin"),
+        "the skip-only pass names the unconverged path: {line}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&registry).unwrap(),
+        original,
+        "no write"
+    );
+    assert_eq!(
+        std::fs::metadata(&registry).unwrap().modified().unwrap(),
+        before,
+        "no write (mtime)"
+    );
+}
+
+/// The separator half of the windows contract: CC records `\`-spelled paths
+/// on windows, and the remap must converge them exactly like `/`-spelled
+/// ones. Both spellings converge to the one canonical twin the product's
+/// component-wise join builds, asserted by exact display equality on every
+/// platform.
+#[test]
+fn registry_remap_matches_both_separator_spellings() {
+    use crate::testutil::HomeSandbox;
+
+    let home = HomeSandbox::new();
+    let claude = home.home().join(".claude");
+    let clauth = home.home().join(".clauth");
+    let profiles = clauth.join("profiles");
+    let prefix_fwd = format!("{}/", profiles.display());
+    let prefix_back = format!("{}\\", profiles.display());
+
+    let canonical = claude
+        .join("plugins")
+        .join("cache")
+        .join("mkt")
+        .join("plugin")
+        .join("1");
+    std::fs::create_dir_all(&canonical).expect("twin dir");
+
+    let back_path = format!(
+        "{}\\D0\\runtime-9-0\\plugins\\cache\\mkt\\plugin\\1",
+        profiles.display()
+    );
+    match super::registry_remap(&back_path, &prefix_fwd, &prefix_back, &claude) {
+        agentgear::Remap::Rewrite(to) => assert_eq!(
+            to,
+            canonical.display().to_string(),
+            "the backslash-spelled path rewrites to the canonical twin"
+        ),
+        agentgear::Remap::Keep => {
+            panic!("a dead backslash-spelled path with a twin must rewrite, got Keep")
+        }
+        agentgear::Remap::Skip(reason) => {
+            panic!("a dead backslash-spelled path with a twin must rewrite, got Skip({reason})")
+        }
+    }
+
+    let fwd_path = format!(
+        "{}/D0/runtime-9-0/plugins/cache/mkt/plugin/1",
+        profiles.display()
+    );
+    match super::registry_remap(&fwd_path, &prefix_fwd, &prefix_back, &claude) {
+        agentgear::Remap::Rewrite(to) => assert_eq!(
+            to,
+            canonical.display().to_string(),
+            "the forward-spelled path rewrites to the canonical twin"
+        ),
+        agentgear::Remap::Keep => {
+            panic!("a dead forward-spelled path with a twin must rewrite, got Keep")
+        }
+        agentgear::Remap::Skip(reason) => {
+            panic!("a dead forward-spelled path with a twin must rewrite, got Skip({reason})")
+        }
+    }
+
+    let outside = "/home/u/.claude/plugins/cache/mkt/plugin/1";
+    assert!(
+        matches!(
+            super::registry_remap(outside, &prefix_fwd, &prefix_back, &claude),
+            agentgear::Remap::Keep
+        ),
+        "a path outside the profiles dir is not targeted"
+    );
+}
+
+/// The detached leg reports a skip-only line once per process: the daemon
+/// tick would otherwise repeat the same line every tick until a re-login
+/// lands the twin.
+#[test]
+fn detached_repoint_reports_skips_once_per_process() {
+    use crate::testutil::HomeSandbox;
+
+    let home = HomeSandbox::new();
+    let claude = home.home().join(".claude");
+    let clauth = home.home().join(".clauth");
+
+    let missing = format!(
+        "{}/D0/runtime-672416-5/plugins/cache/claude-plugins-official/security-guidance/2.0.8",
+        clauth.join("profiles").display()
+    );
+    let registry = claude.join("plugins/installed_plugins.json");
+    std::fs::create_dir_all(registry.parent().unwrap()).expect("plugins dir");
+    std::fs::write(
+        &registry,
+        format!(r#"{{"version":2,"plugins":{{"x@x":[{{"installPath":"{missing}"}}]}}}}"#),
+    )
+    .expect("registry");
+
+    let first = super::detached_repoint_line().expect("first pass");
+    assert!(first.is_some(), "the first pass names the skip: {first:?}");
+    let second = super::detached_repoint_line().expect("second pass");
+    assert_eq!(second, None, "the second pass stays silent until reset");
+    super::reset_skip_report_for_test();
+    let third = super::detached_repoint_line().expect("third pass");
+    assert!(third.is_some(), "the reset re-arms the report");
+}
+
+/// The committed install script runs the heal after both install legs, so a
+/// binary install converges dangling plugin paths without waiting for the
+/// next session start. A drift here silently drops the fix.
+#[test]
+fn install_sh_runs_self_heal_after_both_install_legs() {
+    let script = include_str!("../../install.sh");
+    assert_eq!(
+        script.matches("self-heal").count(),
+        2,
+        "install.sh must run `clauth self-heal` after the cargo leg and after the download leg: {script}"
+    );
+    assert!(
+        script.contains("cargo install clauth")
+            && script.contains("\"${INSTALL_DIR}/${BINARY}\" self-heal"),
+        "both legs carry the heal call"
+    );
+}
+
+/// The silent contract: a clean or absent registry prints nothing and moves
+/// no bytes, so a session start stays quiet.
+#[test]
+fn repoint_registry_says_nothing_when_clean() {
+    use crate::testutil::HomeSandbox;
+
+    let home = HomeSandbox::new();
+    let claude = home.home().join(".claude");
+
+    // Absent registry: nothing to converge, nothing created.
+    let registry = claude.join("plugins/installed_plugins.json");
+    let outcome = super::repoint_registry().expect("repoint");
+    assert!(
+        outcome.line.is_none(),
+        "no registry, nothing to say: {outcome:?}"
+    );
+    assert!(!registry.exists(), "a missing registry is not created");
+
+    // Clean registry: no targets, no write.
+    let bytes = r#"{
+  "version": 2,
+  "plugins": {
+    "widget@widget": [
+      { "scope": "user", "installPath": "CLAUDE_TWIN_PLACEHOLDER" }
+    ]
+  }
+}
+"#
+    .replace(
+        "CLAUDE_TWIN_PLACEHOLDER",
+        &claude
+            .join("plugins/cache/widget/widget/0.5.1")
+            .display()
+            .to_string(),
+    );
+    std::fs::create_dir_all(registry.parent().unwrap()).expect("plugins dir");
+    std::fs::write(&registry, &bytes).expect("registry");
+    let before = std::fs::metadata(&registry).unwrap().modified().unwrap();
+
+    let outcome = super::repoint_registry().expect("repoint");
+    assert!(
+        outcome.line.is_none(),
+        "nothing targeted, nothing to say: {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&registry).unwrap(),
+        bytes,
+        "no write"
+    );
+    assert_eq!(
+        std::fs::metadata(&registry).unwrap().modified().unwrap(),
+        before,
+        "no write (mtime)"
+    );
+}

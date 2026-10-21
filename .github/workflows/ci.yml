@@ -1,0 +1,209 @@
+name: ci
+
+on:
+  push:
+    branches: [mommy]
+    paths-ignore:
+      - "**/*.md"
+      - wiki/**
+      - docs/**
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - wiki/**
+      - docs/**
+
+# Least-privilege default: read-only token. A job that needs more (e.g. a docker
+# publish job) opts back up with its own `permissions:` block.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref so rapid pushes don't stack.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Force HTTP/1.1 for registry downloads: curl's HTTP/2 multiplexing against the
+# crates.io CDN intermittently dies with "[16] Error in the HTTP2 framing layer"
+# on the hosted runners. Extra retries cover the remaining transient blips.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_INCREMENTAL: "0"  # incremental caching is dead weight in CI
+  # CI checks compile at release opt-level but WITHOUT the shipped binary's LTO:
+  # LTO + codegen-units=1 change nothing for clippy/test and roughly double the
+  # compile. release.yml is a separate workflow, so the shipped binary keeps full
+  # LTO; this override only touches CI's throwaway build.
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+# A `v*` tag push runs release.yml only, never CI: the `on.push.branches` filter
+# already excludes tag refs, and the per-job `if` keeps checks off tag/release refs
+# even if that trigger is later broadened. PRs (refs/pull/*) and branch pushes run.
+jobs:
+  fmt:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The images' own rustup, not the dtolnay action: its env-hygiene guard
+      # bails on the runner images' exported BASH_FUNC_ vars (2026-09-22, all
+      # three legs, before any code ran).
+      - name: rust toolchain (stable + rustfmt)
+        run: rustup toolchain install stable --profile minimal --component rustfmt && rustup default stable
+      - name: fmt --check
+        run: cargo fmt --all -- --check
+
+  # clippy → test → release build as sequential steps in ONE job per OS so the
+  # dep compile happens once: clippy builds deps + lints, test (nextest) reuses
+  # target/, the release binary falls out of it, then uploads as a 1-day
+  # artifact. Matrixed across all 3 OSes: clauth ships native Windows + macOS
+  # binaries (release.yml) and has real cfg(windows) code (src/platform.rs,
+  # src/runtime.rs), so ubuntu-only clippy would never see it. mold self-gates
+  # on linux. Trade: a clippy failure aborts before test/build on that OS.
+  check:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    name: check / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      # Same env-hygiene story as the fmt job: the dtolnay action bails on the
+      # images' BASH_FUNC_ exports.
+      - name: rust toolchain (stable + clippy + llvm-tools)
+        run: rustup toolchain install stable --profile minimal --component clippy,llvm-tools && rustup default stable
+      # mold is the fast linker on linux; self-gates so the mac/windows legs
+      # fall back to the platform default. Runs before rust-cache so RUSTFLAGS
+      # is part of the cache key.
+      - name: fast linker (mold on linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y mold
+          echo "RUSTFLAGS=${RUSTFLAGS} -C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      # nextest's own installer, not the taiki-e action: the shared
+      # install-action hygiene guard bails on the mac/windows images' bash
+      # startup (the same 2026-09-22 regression as the toolchain action above).
+      - name: install nextest
+        shell: bash
+        run: curl -LsSf https://get.nexte.st/latest/${{ matrix.os == 'windows-latest' && 'windows-tar' || matrix.os == 'macos-latest' && 'mac' || 'linux' }} | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+      - if: runner.os == 'Linux'
+        uses: taiki-e/install-action@cargo-llvm-cov
+      # `every_completion_script_parses_in_its_own_shell` runs each shipped
+      # completion script through its OWN parser, and skips a dialect whose
+      # shell is absent. nextest discards a passing test's output, so without
+      # these installs the skip would be indistinguishable from a pass and the
+      # leg would quietly never run: neither zsh nor fish is in the runner
+      # images (macOS ships zsh as an OS component, not as an image addition).
+      # CLAUTH_REQUIRE_SHELL_LINT turns a skip into a failure, so a runner image
+      # that later drops one of them reds the build instead of going silent.
+      # Windows needs nothing: the leg is `#[cfg(unix)]`.
+      - name: shells for the completion-script lint
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux)   sudo apt-get update && sudo apt-get install -y zsh fish ;;
+            macOS)   brew install fish ;;
+            Windows) echo "completion lint is cfg(unix); nothing to install" ;;
+            # Fail with the REAL signal: without this arm an unrecognised
+            # runner.os installs nothing and the job reds later inside the
+            # lint with a missing-shell message that reads like a test bug.
+            *)       echo "unrecognised runner.os '${{ runner.os }}'" >&2; exit 1 ;;
+          esac
+          echo "CLAUTH_REQUIRE_SHELL_LINT=1" >> "$GITHUB_ENV"
+      # `--locked` on every leg that resolves dependencies, so a `Cargo.lock` the
+      # committed manifest no longer matches reds here instead of being silently
+      # updated in the runner and thrown away with it.
+      - name: clippy (-D warnings)
+        run: cargo clippy --locked --all-targets --all-features --release -- -D warnings
+      # `--no-fail-fast` so a red run reports every failure instead of a prefix: nextest
+      # cancels at the first one, so you fix what you were shown, push, and are handed
+      # more — which reads like a regression your own fix caused, at a build per round.
+      - name: test
+        shell: bash
+        env:
+          # The TLS tests build their certificates with `openssl`, and skip
+          # themselves when it is absent — a skip that reads exactly like a pass
+          # in the summary line, over the listener's ONLY coverage. The Linux and
+          # macOS images carry openssl, so require it there; Windows images do
+          # not reliably, and a hard requirement would red on that alone.
+          CLAUTH_REQUIRE_TLS_FIXTURE: ${{ runner.os == 'Windows' && '0' || '1' }}
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cargo llvm-cov nextest --lcov --output-path lcov.info --locked --release --all-targets --all-features --no-fail-fast
+          else
+            cargo nextest run --locked --release --all-targets --all-features --no-fail-fast
+          fi
+      # Every leg above is --release, where debug_assertions is off and
+      # `#[cfg(debug_assertions)]` code is not merely unlinted but absent: a test
+      # gated on it cannot run at all, so the local gate was catching regressions
+      # CI could not. clippy first so the debug artifacts it builds are reused by
+      # the test leg. Both self-gate on the cfg appearing in the crate, so a repo
+      # without one skips instead of paying a second full compile. A bare
+      # `debug_assert!` is deliberately not a trigger: it expands to a
+      # `cfg!`-guarded assert that release still type- and lint-checks.
+      - name: debug clippy + test
+        shell: bash
+        env:
+          CLAUTH_REQUIRE_TLS_FIXTURE: ${{ runner.os == 'Windows' && '0' || '1' }}
+        run: |
+          if grep -rqs --include='*.rs' --exclude-dir=target --exclude-dir=.git -e debug_assertions .; then
+            cargo clippy --locked --all-targets --all-features -- -D warnings
+            cargo nextest run --locked --all-targets --all-features --no-fail-fast
+          else
+            echo "no debug_assertions in crate; skipping debug legs"
+          fi
+      # nextest can't run doctests, so cover them with cargo test. Self-gates on
+      # a doctest target so a bin-only crate skips instead of erroring with "no
+      # library targets found". shell: bash so all 3 OS legs get grep (windows
+      # runners ship Git Bash).
+      - name: doctests
+        shell: bash
+        run: |
+          if cargo metadata --locked --no-deps --format-version 1 | grep -q '"doctest":true'; then
+            cargo test --locked --release --doc --all-features
+          else
+            echo "no doctest targets; skipping"
+          fi
+      - name: coverage report
+        if: runner.os == 'Linux'
+        uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1.5.2
+        with:
+          version: v0.79.0
+      - name: build release binary
+        run: cargo build --locked --release
+      - name: upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: clauth-${{ matrix.os }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            target/release/clauth
+            target/release/clauth.exe
+
+  deny:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
+  audit:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@cargo-audit
+      - name: cargo audit
+        run: cargo audit
