@@ -55,8 +55,8 @@ Without Nix, run `tagteam daemon` as a service of your own.
 ## Herdr
 
 `herdr/tagteam-usage/` is a mod for the [Herdr](https://herdr.dev) desktop app.
-It shows a small window with each account's 5-hour and weekly usage, marks the
-active account and lists reset times and failed checks on hover.
+It shows a small window with each account's 5-hour and weekly usage and when
+each limit resets, marks the active account and lists failed checks on hover.
 
 - Install it with the Home Manager option above, or copy the folder to
   `~/.config/herdr-app/mods/`.
