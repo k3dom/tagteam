@@ -15,6 +15,9 @@ and writes state, so state such as the usage cache lives in its memory.
   daemon together).
 - CLI: `cli.ts` (the root command), `main.ts`, `client.ts` (the API client) and
   `commands/`, which reach the daemon only through the client.
+- `herdr/tagteam-usage/`: a mod for the Herdr desktop app, plain JavaScript that
+  Herdr runs and that reads `tagteam list --json`. Herdr's own guide and type
+  files are in `~/.config/herdr-app/`.
 
 ## Tooling
 

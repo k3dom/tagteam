@@ -1,0 +1,10 @@
+{
+  "place": "none",
+  "title": "Tagteam usage",
+  "overlay": {
+    "kind": "window",
+    "key": "tagteam-usage",
+    "keep": true,
+    "at": { "x": 280, "y": 56 }
+  }
+}

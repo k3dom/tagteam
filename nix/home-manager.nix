@@ -28,6 +28,16 @@ in {
       description = "Seconds between usage checks. Anthropic rate limits usage requests, so it can't go below 10.";
     };
 
+    herdr.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Whether to install the tagteam-usage mod for the Herdr desktop app, a
+        window that shows the usage of your accounts. Open it once with Herdr's
+        mod.open command, after which Herdr reopens it on every start.
+      '';
+    };
+
     claudeCodePackage = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
       default =
@@ -44,6 +54,13 @@ in {
 
   config = lib.mkIf cfg.enable {
     home.packages = [cfg.package];
+
+    xdg.configFile."herdr-app/mods/tagteam-usage" = lib.mkIf cfg.herdr.enable {
+      source = "${cfg.package}/share/tagteam/herdr/tagteam-usage";
+      # Herdr writes its type files into the mod's folder, so only the files
+      # are linked.
+      recursive = true;
+    };
 
     systemd.user.services.tagteam = {
       Unit = {

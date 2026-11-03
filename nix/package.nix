@@ -19,6 +19,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
       ../pnpm-lock.yaml
       ../pnpm-workspace.yaml
       ../src
+      ../herdr
     ];
   };
 
@@ -40,6 +41,8 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook preInstall
     mkdir -p $out/lib/tagteam
     cp -r package.json src node_modules $out/lib/tagteam
+    mkdir -p $out/share/tagteam
+    cp -r herdr $out/share/tagteam
     makeWrapper ${lib.getExe nodejs-slim_26} $out/bin/tagteam \
       --add-flags $out/lib/tagteam/src/index.ts
     runHook postInstall
