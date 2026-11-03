@@ -16,6 +16,7 @@ tagteam daemon          # watch usage, switch accounts and serve the commands be
 tagteam add             # add the account Claude Code is logged into
 tagteam add --main      # add it and make it the main account
 tagteam list            # accounts in priority order with their usage
+tagteam list --json     # the same as JSON, for scripts and widgets
 tagteam main 2          # make account 2 (or an email) the main account
 tagteam remove 3        # stop managing account 3
 ```
@@ -45,10 +46,27 @@ services.tagteam.enable = true;
 
 - `services.tagteam.threshold` and `services.tagteam.interval` set the daemon's
   flags.
+- `services.tagteam.herdr.enable` installs the [Herdr](#herdr) mod.
 - With `programs.claude-code` enabled, the service puts Claude Code on its
   `PATH`, since tagteam identifies itself with Claude Code's version.
 
 Without Nix, run `tagteam daemon` as a service of your own.
+
+## Herdr
+
+`herdr/tagteam-usage/` is a mod for the [Herdr](https://herdr.dev) desktop app.
+It shows a small window with each account's 5-hour and weekly usage and when
+each limit resets, marks the active account and lists failed checks on hover.
+
+- Install it with the Home Manager option above, or copy the folder to
+  `~/.config/herdr-app/mods/`.
+- Open it with `herdr-app do mod.open --name tagteam-usage`, or run `mod.open`
+  from the command palette. It floats over the layout it was opened in, any
+  layout including the default one, and Herdr reopens it there on every start.
+  Running `mod.open` again closes it.
+- Drag it where you want it. Herdr remembers the spot.
+- It runs `tagteam list --json` every 30 seconds, which answers from the
+  daemon's cache, so it doesn't spend usage requests.
 
 ## How it works
 
