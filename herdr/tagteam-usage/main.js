@@ -1,5 +1,5 @@
-// The usage of tagteam's accounts, as its daemon last checked it. The daemon is
-// the only one asking Anthropic, so polling `tagteam list` costs no requests.
+// Only tagteam's daemon asks Anthropic, so polling `tagteam list` costs no
+// usage requests.
 
 import { v_flex, h_flex } from 'gpui-base'
 import { View, div } from 'gpui-kit'
@@ -23,6 +23,7 @@ export default class TagteamUsage extends View {
   init(_props, cx) {
     this.accounts = null
     this.error = null
+    this.busy = false
     cx.timer.every(30000, (tick) => this.refresh(tick))
     this.refresh(cx)
   }
@@ -153,16 +154,11 @@ export default class TagteamUsage extends View {
           .text_color(account.active ? t.foreground : t.muted)
           .child(account.email.split('@')[0])
       )
-      .when(Boolean(usage), (el) =>
-        el
-          .child(meter('5h', usage.five_hour))
-          .child(meter('wk', usage.seven_day))
+      .children(
+        usage
+          ? [meter('5h', usage.five_hour), meter('wk', usage.seven_day)]
+          : [div().flex_1().text_color(t.dim).child('usage unknown')]
       )
-      .when(!usage, (el) =>
-        el.child(div().flex_1().text_color(t.dim).child('usage unknown'))
-      )
-      .when(Boolean(failure), (el) =>
-        el.child(div().text_color(t.ansi3).child('!'))
-      )
+      .when(failure, (el) => el.child(div().text_color(t.ansi3).child('!')))
   }
 }

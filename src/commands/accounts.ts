@@ -14,39 +14,6 @@ import * as Client from '#/client.ts'
 import * as Usage from '#/domain/usage.ts'
 import * as Format from '#/lib/format.ts'
 
-const ListJson = Schema.fromJsonString(
-  Schema.Struct({
-    accounts: Schema.Array(
-      Schema.Struct({
-        position: Schema.Int,
-        email: Schema.String,
-        main: Schema.Boolean,
-        active: Schema.Boolean,
-        usage: Schema.NullOr(
-          Schema.Struct({
-            fiveHour: Schema.NullOr(Usage.Window),
-            sevenDay: Schema.NullOr(Usage.Window),
-            checkedAt: Schema.DateTimeUtcFromString,
-          }).pipe(
-            Schema.encodeKeys({
-              fiveHour: 'five_hour',
-              sevenDay: 'seven_day',
-              checkedAt: 'checked_at',
-            })
-          )
-        ),
-        failure: Schema.NullOr(
-          Schema.Struct({
-            message: Schema.String,
-            retryAt: Schema.DateTimeUtcFromString,
-          }).pipe(Schema.encodeKeys({ retryAt: 'retry_at' }))
-        ),
-      })
-    ),
-  }),
-  { space: 2 }
-)
-
 const account = Argument.String('account').pipe(
   Argument.withDescription(
     'The account number from `tagteam list`, or its email'
@@ -91,16 +58,50 @@ export const list = Command.make(
     const client = yield* Client.Client
     const all = yield* client.accounts.list()
     if (json) {
+      const ListJson = Schema.fromJsonString(
+        Schema.Struct({
+          accounts: Schema.Array(
+            Schema.Struct({
+              position: Schema.Int,
+              email: Schema.String,
+              main: Schema.Boolean,
+              active: Schema.Boolean,
+              usage: Schema.NullOr(
+                Schema.Struct({
+                  fiveHour: Schema.NullOr(Usage.Window),
+                  sevenDay: Schema.NullOr(Usage.Window),
+                  checkedAt: Schema.DateTimeUtcFromString,
+                }).pipe(
+                  Schema.encodeKeys({
+                    fiveHour: 'five_hour',
+                    sevenDay: 'seven_day',
+                    checkedAt: 'checked_at',
+                  })
+                )
+              ),
+              failure: Schema.NullOr(
+                Schema.Struct({
+                  message: Schema.String,
+                  retryAt: Schema.DateTimeUtcFromString,
+                }).pipe(Schema.encodeKeys({ retryAt: 'retry_at' }))
+              ),
+            })
+          ),
+        }),
+        { space: 2 }
+      )
       const accounts = Array.map(all, ({ email, active, usage }, index) => ({
         position: index + 1,
         email,
         main: index === 0,
         active,
-        usage: Option.getOrNull(
-          Option.map(usage.latest, ({ usage: known, checkedAt }) => ({
+        usage: pipe(
+          usage.latest,
+          Option.map(({ usage: known, checkedAt }) => ({
             ...known,
             checkedAt,
-          }))
+          })),
+          Option.getOrNull
         ),
         failure: Option.getOrNull(usage.failure),
       }))
