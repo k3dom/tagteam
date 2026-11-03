@@ -16,6 +16,7 @@ tagteam daemon          # watch usage, switch accounts and serve the commands be
 tagteam add             # add the account Claude Code is logged into
 tagteam add --main      # add it and make it the main account
 tagteam list            # accounts in priority order with their usage
+tagteam list --json     # the same as JSON, for scripts and widgets
 tagteam main 2          # make account 2 (or an email) the main account
 tagteam remove 3        # stop managing account 3
 ```

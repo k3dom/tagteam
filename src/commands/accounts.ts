@@ -1,9 +1,51 @@
-import { Array, Console, DateTime, Effect, Option, pipe, String } from 'effect'
+import {
+  Array,
+  Console,
+  DateTime,
+  Effect,
+  Option,
+  pipe,
+  Schema,
+  String,
+} from 'effect'
 import { Argument, Command, Flag } from 'effect/cli'
 
 import * as Client from '#/client.ts'
-import type * as Usage from '#/domain/usage.ts'
+import * as Usage from '#/domain/usage.ts'
 import * as Format from '#/lib/format.ts'
+
+const ListJson = Schema.fromJsonString(
+  Schema.Struct({
+    accounts: Schema.Array(
+      Schema.Struct({
+        position: Schema.Int,
+        email: Schema.String,
+        main: Schema.Boolean,
+        active: Schema.Boolean,
+        usage: Schema.NullOr(
+          Schema.Struct({
+            fiveHour: Schema.NullOr(Usage.Window),
+            sevenDay: Schema.NullOr(Usage.Window),
+            checkedAt: Schema.DateTimeUtcFromString,
+          }).pipe(
+            Schema.encodeKeys({
+              fiveHour: 'five_hour',
+              sevenDay: 'seven_day',
+              checkedAt: 'checked_at',
+            })
+          )
+        ),
+        failure: Schema.NullOr(
+          Schema.Struct({
+            message: Schema.String,
+            retryAt: Schema.DateTimeUtcFromString,
+          }).pipe(Schema.encodeKeys({ retryAt: 'retry_at' }))
+        ),
+      })
+    ),
+  }),
+  { space: 2 }
+)
 
 const account = Argument.String('account').pipe(
   Argument.withDescription(
@@ -37,10 +79,35 @@ export const add = Command.make(
 
 export const list = Command.make(
   'list',
-  {},
-  Effect.fn('commands.list')(function* () {
+  {
+    json: Flag.Boolean('json').pipe(
+      Flag.withDescription(
+        'Print the accounts as JSON, for scripts and widgets'
+      ),
+      Flag.withDefault(false)
+    ),
+  },
+  Effect.fn('commands.list')(function* ({ json }) {
     const client = yield* Client.Client
     const all = yield* client.accounts.list()
+    if (json) {
+      const accounts = Array.map(all, ({ email, active, usage }, index) => ({
+        position: index + 1,
+        email,
+        main: index === 0,
+        active,
+        usage: Option.getOrNull(
+          Option.map(usage.latest, ({ usage: known, checkedAt }) => ({
+            ...known,
+            checkedAt,
+          }))
+        ),
+        failure: Option.getOrNull(usage.failure),
+      }))
+      return yield* Console.log(
+        yield* Schema.encodeEffect(ListJson)({ accounts }).pipe(Effect.orDie)
+      )
+    }
     if (Array.isReadonlyArrayEmpty(all)) {
       return yield* Console.log(
         'No accounts yet. Run `tagteam add` to add the account Claude Code is logged into.'

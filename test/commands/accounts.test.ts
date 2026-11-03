@@ -1,7 +1,7 @@
 import { NodeServices } from '@effect/platform-node'
 import { layer } from '@effect/vitest'
 import { assertSome, deepStrictEqual } from '@effect/vitest/utils'
-import { Effect, Exit, Layer } from 'effect'
+import { Array, Effect, Exit, Layer } from 'effect'
 import { TestClock } from 'effect/testing'
 
 import * as Server from '#/app/server.ts'
@@ -48,6 +48,59 @@ layer(NodeServices.layer)('the account commands', (it) => {
         ].join('\n'),
       ])
       deepStrictEqual(yield* box.stored, [main, backup])
+    })
+  )
+
+  it.effect('list the accounts as JSON', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(start.epochMilliseconds)
+      const main = login('main')
+      const backup = login('backup')
+      const box = yield* serve({ live: backup, accounts: [main, backup] })
+      box.usage.set('main', 'rate-limited')
+      box.usage.set('backup', { fiveHour: 42.4, sevenDay: 7 })
+
+      const listed = yield* Cli.run(box.socket, ['list', '--json'])
+
+      deepStrictEqual(
+        Array.map(listed.stdout, (line) => JSON.parse(globalThis.String(line))),
+        [
+          {
+            accounts: [
+              {
+                position: 1,
+                email: 'main@example.com',
+                main: true,
+                active: false,
+                usage: null,
+                failure: {
+                  message:
+                    "Couldn't check usage because Anthropic limits how often it can be checked.",
+                  retry_at: '2026-10-21T08:02:00.000Z',
+                },
+              },
+              {
+                position: 2,
+                email: 'backup@example.com',
+                main: false,
+                active: true,
+                usage: {
+                  five_hour: {
+                    utilization: 42.4,
+                    resets_at: '2026-10-21T10:00:00.000Z',
+                  },
+                  seven_day: {
+                    utilization: 7,
+                    resets_at: '2026-10-24T08:00:00.000Z',
+                  },
+                  checked_at: '2026-10-21T08:00:00.000Z',
+                },
+                failure: null,
+              },
+            ],
+          },
+        ]
+      )
     })
   )
 
