@@ -23,8 +23,9 @@ tagteam remove 3        # stop managing account 3
 
 - The first account added is the main account. The others follow in the order
   you add them.
-- The daemon keeps Claude Code on the first account that is below 90% of both
-  limits. If none is, Claude Code stays where it is.
+- The daemon prefers the first account that is below 90% of both limits. If none
+  is, it uses the first account still below 100% of both limits. If no account
+  has capacity left, Claude Code stays where it is.
 - It checks the active account every minute and the others every five minutes.
   `tagteam list` shows the usage from these checks, so it doesn't spend more of
   the requests Anthropic allows.

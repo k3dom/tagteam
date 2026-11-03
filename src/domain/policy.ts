@@ -34,8 +34,8 @@ export interface Candidate {
 
 /**
  * The account Claude Code should switch to: the first one in priority order
- * that is under its limits. An account whose usage is unknown only counts as
- * under its limits while it is active, so that tagteam never switches to an
+ * that is below the threshold, or below 100% if none is below the threshold.
+ * Unknown usage only qualifies while active, so tagteam never switches to an
  * account it couldn't check.
  */
 export const choose = (
@@ -49,6 +49,13 @@ export const choose = (
         onNone: () => active,
         onSome: (known) => Option.isNone(exhausted(known, threshold, now)),
       })
+    ),
+    Option.orElse(() =>
+      Array.findFirst(candidates, ({ usage }) =>
+        Option.exists(usage, (known) =>
+          Option.isNone(exhausted(known, 100, now))
+        )
+      )
     ),
     Option.filter(({ active }) => !active)
   )

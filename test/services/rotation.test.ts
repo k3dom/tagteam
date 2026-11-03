@@ -121,6 +121,110 @@ layer(NodeServices.layer)('Rotation', (it) => {
       })
   )
 
+  it.effect.each([
+    {
+      name: 'uses weekly reserve when the active 5-hour limit is full',
+      mainUsage: { fiveHour: 39, sevenDay: 90 },
+      backupUsage: { fiveHour: 100 },
+      expected: 'main',
+    },
+    {
+      name: 'uses 5-hour reserve when the active weekly limit is full',
+      mainUsage: { fiveHour: 90 },
+      backupUsage: { fiveHour: 10, sevenDay: 100 },
+      expected: 'main',
+    },
+    {
+      name: 'uses the remaining capacity when both limits are near full',
+      mainUsage: { fiveHour: 99, sevenDay: 99 },
+      backupUsage: { fiveHour: 100 },
+      expected: 'main',
+    },
+    {
+      name: 'prefers the main account when all accounts are in reserve',
+      mainUsage: { fiveHour: 39, sevenDay: 90 },
+      backupUsage: { fiveHour: 95 },
+      expected: 'main',
+    },
+    {
+      name: 'never falls back to an account with a full 5-hour limit',
+      mainUsage: { fiveHour: 100 },
+      backupUsage: { fiveHour: 10, sevenDay: 100 },
+      expected: 'backup',
+    },
+    {
+      name: 'never falls back to an account with a full weekly limit',
+      mainUsage: { fiveHour: 39, sevenDay: 100 },
+      backupUsage: { fiveHour: 100 },
+      expected: 'backup',
+    },
+    {
+      name: 'never falls back to an account with unknown usage',
+      mainUsage: 'unauthorized' as const,
+      backupUsage: { fiveHour: 100 },
+      expected: 'backup',
+    },
+    {
+      name: 'keeps an active account below the threshold ahead of reserve',
+      mainUsage: { fiveHour: 39, sevenDay: 90 },
+      backupUsage: { fiveHour: 89 },
+      expected: 'backup',
+    },
+    {
+      name: 'keeps an active account with unknown usage ahead of reserve',
+      mainUsage: { fiveHour: 39, sevenDay: 90 },
+      backupUsage: 'unauthorized' as const,
+      expected: 'backup',
+    },
+  ])('$name', ({ mainUsage, backupUsage, expected }) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(start.epochMilliseconds)
+      const main = login('main')
+      const backup = login('backup')
+      const box = yield* Sandbox.make({
+        live: backup,
+        accounts: [main, backup],
+      })
+      box.usage.set('main', mainUsage)
+      box.usage.set('backup', backupUsage)
+
+      yield* tick().pipe(Effect.provide(box.layer))
+
+      deepStrictEqual(
+        (yield* box.claudeCode).config['oauthAccount'],
+        login(expected).oauthAccount
+      )
+    })
+  )
+
+  it.effect('keeps using reserve until an account recovers', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(start.epochMilliseconds)
+      const main = login('main')
+      const backup = login('backup')
+      const box = yield* Sandbox.make({
+        live: backup,
+        accounts: [main, backup],
+      })
+      box.usage.set('main', { fiveHour: 39, sevenDay: 90 })
+      box.usage.set('backup', { fiveHour: 100, resetsAt: at({ hours: 1 }) })
+      const rotation = yield* Rotation.Rotation.make({
+        threshold: 90,
+        interval: '1 minute',
+      }).pipe(Effect.provide(box.layer))
+      const activeAfterTick = Effect.gen(function* () {
+        yield* rotation.tick()
+        return (yield* box.claudeCode).config['oauthAccount']
+      })
+
+      deepStrictEqual(yield* activeAfterTick, main.oauthAccount)
+      yield* TestClock.adjust('1 minute')
+      deepStrictEqual(yield* activeAfterTick, main.oauthAccount)
+      yield* TestClock.adjust('59 minutes')
+      deepStrictEqual(yield* activeAfterTick, backup.oauthAccount)
+    })
+  )
+
   it.effect('leaves a login it does not manage alone', () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(start.epochMilliseconds)
