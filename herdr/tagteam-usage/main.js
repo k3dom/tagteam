@@ -56,23 +56,21 @@ export default class TagteamUsage extends View {
     const root = v_flex()
       .id('root')
       .min_w(250)
-      .max_w(360)
+      .max_w(460)
       .px(10)
       .py(7)
       .gap(6)
       .text_size(12)
       .text_color(t.foreground)
     if (this.error) {
-      return root.child(div().text_color(t.muted).child(this.error))
+      return root.child(div().child(this.error))
     }
     if (!this.accounts) {
-      return root.child(div().text_color(t.dim).child('Loading usage…'))
+      return root.child(div().child('Loading usage…'))
     }
     if (this.accounts.length === 0) {
       return root.child(
-        div()
-          .text_color(t.muted)
-          .child('No accounts yet. Run `tagteam add` to add one.')
+        div().child('No accounts yet. Run `tagteam add` to add one.')
       )
     }
     const now = Date.now()
@@ -90,7 +88,7 @@ export default class TagteamUsage extends View {
         .gap(5)
         .items_center()
         .whitespace_nowrap()
-        .child(div().text_color(t.dim).child(label))
+        .child(div().child(label))
         .child(
           div()
             .w(44)
@@ -107,25 +105,21 @@ export default class TagteamUsage extends View {
         )
         .child(
           div()
-            .w(30)
-            .text_right()
-            .text_color(window ? t.foreground : t.dim)
-            .child(window ? `${Math.round(window.utilization)}%` : '–')
+            .w(92)
+            .child(
+              window
+                ? `${Math.round(window.utilization)}%` +
+                    (window.resets_at
+                      ? ` (${roughly(Date.parse(window.resets_at) - now)})`
+                      : '')
+                : '–'
+            )
         )
-    const describe = (name, window) =>
-      window &&
-      `${name} ${Math.round(window.utilization)}%` +
-        (window.resets_at
-          ? `, resets in ${roughly(Date.parse(window.resets_at) - now)}`
-          : '')
-
     const { usage, failure } = account
     const details = [
       [account.email, account.main && 'main', account.active && 'active']
         .filter(Boolean)
         .join(' · '),
-      usage && describe('5-hour', usage.five_hour),
-      usage && describe('Weekly', usage.seven_day),
       usage && `Checked ${roughly(now - Date.parse(usage.checked_at))} ago`,
       !usage &&
         !failure &&
@@ -157,7 +151,7 @@ export default class TagteamUsage extends View {
       .children(
         usage
           ? [meter('5h', usage.five_hour), meter('wk', usage.seven_day)]
-          : [div().flex_1().text_color(t.dim).child('usage unknown')]
+          : [div().flex_1().child('usage unknown')]
       )
       .when(failure, (el) => el.child(div().text_color(t.ansi3).child('!')))
   }
