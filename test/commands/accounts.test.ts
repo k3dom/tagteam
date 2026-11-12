@@ -55,7 +55,9 @@ layer(NodeServices.layer)('the account commands', (it) => {
     Effect.gen(function* () {
       yield* TestClock.setTime(start.epochMilliseconds)
       const main = login('main')
-      const backup = login('backup', { tier: 'default_claude_max_20x' })
+      const backup = login('backup', {
+        organizationTier: 'default_claude_max_20x',
+      })
       const box = yield* serve({ live: backup, accounts: [main, backup] })
       box.usage.set('main', 'rate-limited')
       box.usage.set('backup', { fiveHour: 42.4, sevenDay: 7 })

@@ -129,7 +129,13 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
 
     const run = Effect.fn('Rotation.run')(function* () {
       yield* Effect.logInfo(
-        `Watching Claude Code's accounts, switching at ${settings.thresholds.pro}% of a limit on Pro, ${settings.thresholds['max-5x']}% on Max 5x and ${settings.thresholds['max-20x']}% on Max 20x.`
+        `Watching Claude Code's accounts, switching at this share of a limit: ${pipe(
+          Plan.Plan.literals,
+          Array.map(
+            (plan) => `${settings.thresholds[plan]}% on ${Plan.label(plan)}`
+          ),
+          Array.join(', ')
+        )}.`
       )
       return yield* tick().pipe(
         Effect.catch((error) => Effect.logWarning(error.message)),

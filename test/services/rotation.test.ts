@@ -159,7 +159,10 @@ layer(NodeServices.layer)('Rotation', (it) => {
     ({ tier, sevenDay, switches }) =>
       Effect.gen(function* () {
         yield* TestClock.setTime(start.epochMilliseconds)
-        const main = login('main', tier === undefined ? {} : { tier })
+        const main = login(
+          'main',
+          tier === undefined ? {} : { organizationTier: tier }
+        )
         const backup = login('backup')
         const box = yield* Sandbox.make({
           live: main,

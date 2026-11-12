@@ -18,8 +18,7 @@ export const login = (
   options: {
     readonly generation?: number
     readonly expiresAt?: number
-    /** The organization's rate limit tier, such as `default_claude_max_20x`. */
-    readonly tier?: string
+    readonly organizationTier?: string
   } = {}
 ): Login.Login => ({
   oauthAccount: {
@@ -27,7 +26,9 @@ export const login = (
     emailAddress: `${name}@example.com`,
     organizationUuid: 'org-uuid',
     organizationName: 'Example',
-    ...(options.tier && { organizationRateLimitTier: options.tier }),
+    ...(options.organizationTier && {
+      organizationRateLimitTier: options.organizationTier,
+    }),
   },
   credentials: {
     claudeAiOauth: {
