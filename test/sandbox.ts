@@ -15,13 +15,19 @@ export const at = (offset: Partial<DateTime.DateTime.PartsForMath>) =>
 
 export const login = (
   name: string,
-  options: { readonly generation?: number; readonly expiresAt?: number } = {}
+  options: {
+    readonly generation?: number
+    readonly expiresAt?: number
+    /** The organization's rate limit tier, such as `default_claude_max_20x`. */
+    readonly tier?: string
+  } = {}
 ): Login.Login => ({
   oauthAccount: {
     accountUuid: `${name}-uuid`,
     emailAddress: `${name}@example.com`,
     organizationUuid: 'org-uuid',
     organizationName: 'Example',
+    ...(options.tier && { organizationRateLimitTier: options.tier }),
   },
   credentials: {
     claudeAiOauth: {

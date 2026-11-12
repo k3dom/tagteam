@@ -11,6 +11,7 @@ import {
 import { Argument, Command, Flag } from 'effect/cli'
 
 import * as Client from '#/client.ts'
+import * as Plan from '#/domain/plan.ts'
 import * as Usage from '#/domain/usage.ts'
 import * as Format from '#/lib/format.ts'
 
@@ -66,6 +67,7 @@ export const list = Command.make(
               email: Schema.String,
               main: Schema.Boolean,
               active: Schema.Boolean,
+              plan: Plan.Plan,
               usage: Schema.NullOr(
                 Schema.Struct({
                   fiveHour: Schema.NullOr(Usage.Window),
@@ -90,21 +92,25 @@ export const list = Command.make(
         }),
         { space: 2 }
       )
-      const accounts = Array.map(all, ({ email, active, usage }, index) => ({
-        position: index + 1,
-        email,
-        main: index === 0,
-        active,
-        usage: pipe(
-          usage.latest,
-          Option.map(({ usage: known, checkedAt }) => ({
-            ...known,
-            checkedAt,
-          })),
-          Option.getOrNull
-        ),
-        failure: Option.getOrNull(usage.failure),
-      }))
+      const accounts = Array.map(
+        all,
+        ({ email, active, plan, usage }, index) => ({
+          position: index + 1,
+          email,
+          main: index === 0,
+          active,
+          plan,
+          usage: pipe(
+            usage.latest,
+            Option.map(({ usage: known, checkedAt }) => ({
+              ...known,
+              checkedAt,
+            })),
+            Option.getOrNull
+          ),
+          failure: Option.getOrNull(usage.failure),
+        })
+      )
       return yield* Console.log(
         yield* Schema.encodeEffect(ListJson)({ accounts }).pipe(Effect.orDie)
       )
@@ -135,13 +141,12 @@ export const list = Command.make(
     yield* Console.log(
       pipe(
         all,
-        Array.map(({ email, active, usage }, index) => {
-          const labels = Format.labels(
-            Array.appendAll(
-              index === 0 ? ['main'] : [],
-              active ? ['active'] : []
-            )
-          )
+        Array.map(({ email, active, plan, usage }, index) => {
+          const labels = Format.labels([
+            ...(index === 0 ? ['main'] : []),
+            ...(active ? ['active'] : []),
+            Plan.label(plan),
+          ])
           const latest = Option.match(usage.latest, {
             onNone: () =>
               Option.isNone(usage.failure)

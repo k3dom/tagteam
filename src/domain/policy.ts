@@ -30,21 +30,22 @@ export interface Candidate {
   readonly login: Login.Login
   readonly active: boolean
   readonly usage: Option.Option<Usage.Usage>
+  /** Percentage of a limit at which tagteam switches away from it. */
+  readonly threshold: number
 }
 
 /**
  * The account Claude Code should switch to: the first one in priority order
- * that is below the threshold, or below 100% if none is below the threshold.
+ * that is below its threshold, or below 100% if none is below its threshold.
  * Unknown usage only qualifies while active, so tagteam never switches to an
  * account it couldn't check.
  */
 export const choose = (
   candidates: ReadonlyArray<Candidate>,
-  threshold: number,
   now: DateTime.Utc
 ): Option.Option<Candidate> =>
   pipe(
-    Array.findFirst(candidates, ({ active, usage }) =>
+    Array.findFirst(candidates, ({ active, usage, threshold }) =>
       Option.match(usage, {
         onNone: () => active,
         onSome: (known) => Option.isNone(exhausted(known, threshold, now)),

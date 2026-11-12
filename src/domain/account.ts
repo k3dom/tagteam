@@ -1,11 +1,15 @@
 import { Schema } from 'effect'
 
+import * as Plan from '#/domain/plan.ts'
 import * as Usage from '#/domain/usage.ts'
 
 export const Account = Schema.Struct({
   email: Schema.String,
   active: Schema.Boolean.annotate({
     description: 'Whether Claude Code is logged into it',
+  }),
+  plan: Plan.Plan.annotate({
+    description: 'Its plan, which sets how close to its limits it may run',
   }),
   usage: Usage.Check,
 })

@@ -2,20 +2,28 @@ import { Duration, Effect } from 'effect'
 import { Command, Flag } from 'effect/cli'
 
 import * as Daemon from '#/app/daemon.ts'
+import * as Plan from '#/domain/plan.ts'
+
+const threshold = (plan: Plan.Plan) =>
+  Flag.Int(`threshold-${plan}`).pipe(
+    Flag.withDescription(
+      `Switch away from a ${Plan.label(plan)} account once it has used this percentage of its 5-hour or weekly limit`
+    ),
+    Flag.filter(
+      (percent) => percent >= 1 && percent <= 100,
+      (percent) => `a percentage from 1 to 100, not ${percent}`
+    ),
+    Flag.withDefault(Plan.defaultThresholds[plan])
+  )
 
 export const command = Command.make(
   'daemon',
   {
-    threshold: Flag.Int('threshold').pipe(
-      Flag.withDescription(
-        'Switch away from an account once it has used this percentage of its 5-hour or weekly limit'
-      ),
-      Flag.filter(
-        (threshold) => threshold >= 1 && threshold <= 100,
-        (threshold) => `a percentage from 1 to 100, not ${threshold}`
-      ),
-      Flag.withDefault(90)
-    ),
+    thresholds: {
+      pro: threshold('pro'),
+      'max-5x': threshold('max-5x'),
+      'max-20x': threshold('max-20x'),
+    },
     interval: Flag.Int('interval').pipe(
       Flag.withDescription('Seconds between usage checks'),
       Flag.filter(
@@ -26,9 +34,9 @@ export const command = Command.make(
       Flag.withDefault(60)
     ),
   },
-  Effect.fn('commands.daemon')(function* ({ threshold, interval }) {
+  Effect.fn('commands.daemon')(function* ({ thresholds, interval }) {
     return yield* Daemon.run({
-      threshold,
+      thresholds,
       interval: Duration.seconds(interval),
     })
   })

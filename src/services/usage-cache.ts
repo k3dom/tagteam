@@ -13,6 +13,7 @@ import {
 
 import * as Account from '#/domain/account.ts'
 import * as Login from '#/domain/login.ts'
+import * as Plan from '#/domain/plan.ts'
 import type * as Usage from '#/domain/usage.ts'
 import * as Anthropic from '#/lib/anthropic.ts'
 import * as ClaudeCode from '#/lib/claude-code.ts'
@@ -203,13 +204,12 @@ export class UsageCache extends Context.Service<UsageCache>()(
               Login.sameAccount(login, stored)
             )
             const active = Option.isSome(current)
+            const login = Option.getOrElse(current, () => stored)
             return {
               email: Login.email(stored),
               active,
-              usage: yield* get(
-                Option.getOrElse(current, () => stored),
-                { active }
-              ),
+              plan: Plan.of(login),
+              usage: yield* get(login, { active }),
             } satisfies Account.Account
           })
         )
