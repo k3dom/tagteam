@@ -23,13 +23,18 @@ tagteam remove 3        # stop managing account 3
 
 - The first account added is the main account. The others follow in the order
   you add them.
-- The daemon prefers the first account that is below 90% of both limits. If none
-  is, it uses the first account still below 100% of both limits. If no account
-  has capacity left, Claude Code stays where it is.
+- The daemon prefers the first account that is below its threshold for both
+  limits. If none is, it uses the first account still below 100% of both limits.
+  If no account has capacity left, Claude Code stays where it is.
+- The threshold depends on the account's plan, which tagteam reads from the rate
+  limit tier Claude Code stores with the login: 90% for Pro, 95% for Max 5x and
+  97% for Max 20x. Team seats count as the Max plan with the same tier, and
+  unknown tiers as Pro. `tagteam list` shows each account's plan.
 - It checks the active account every minute and the others every five minutes.
   `tagteam list` shows the usage from these checks, so it doesn't spend more of
   the requests Anthropic allows.
-- `--threshold <percent>` and `--interval <seconds>` change the defaults.
+- `--threshold-pro`, `--threshold-max-5x`, `--threshold-max-20x` and
+  `--interval <seconds>` change the defaults.
 
 ## Nix
 
@@ -45,8 +50,8 @@ imports = [inputs.tagteam.homeManagerModules.default];
 services.tagteam.enable = true;
 ```
 
-- `services.tagteam.threshold` and `services.tagteam.interval` set the daemon's
-  flags.
+- `services.tagteam.thresholds.pro`, `.max5x`, `.max20x` and
+  `services.tagteam.interval` set the daemon's flags.
 - `services.tagteam.herdr.enable` installs the [Herdr](#herdr) mod.
 - With `programs.claude-code` enabled, the service puts Claude Code on its
   `PATH`, since tagteam identifies itself with Claude Code's version.

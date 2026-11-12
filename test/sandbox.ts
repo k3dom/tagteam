@@ -15,13 +15,20 @@ export const at = (offset: Partial<DateTime.DateTime.PartsForMath>) =>
 
 export const login = (
   name: string,
-  options: { readonly generation?: number; readonly expiresAt?: number } = {}
+  options: {
+    readonly generation?: number
+    readonly expiresAt?: number
+    readonly organizationTier?: string
+  } = {}
 ): Login.Login => ({
   oauthAccount: {
     accountUuid: `${name}-uuid`,
     emailAddress: `${name}@example.com`,
     organizationUuid: 'org-uuid',
     organizationName: 'Example',
+    ...(options.organizationTier && {
+      organizationRateLimitTier: options.organizationTier,
+    }),
   },
   credentials: {
     claudeAiOauth: {

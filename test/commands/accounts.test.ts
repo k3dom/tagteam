@@ -39,11 +39,11 @@ layer(NodeServices.layer)('the account commands', (it) => {
       ])
       deepStrictEqual(listed.stdout, [
         [
-          '* 1. main@example.com (main, active)',
+          '* 1. main@example.com (main, active, Pro)',
           '     5-hour   42%  resets in 2h',
           '     weekly    7%  resets in 3d',
           '     checked 1m ago',
-          '  2. backup@example.com',
+          '  2. backup@example.com (Pro)',
           "     Couldn't check usage because Anthropic limits how often it can be checked. Checking again in 2m.",
         ].join('\n'),
       ])
@@ -55,7 +55,9 @@ layer(NodeServices.layer)('the account commands', (it) => {
     Effect.gen(function* () {
       yield* TestClock.setTime(start.epochMilliseconds)
       const main = login('main')
-      const backup = login('backup')
+      const backup = login('backup', {
+        organizationTier: 'default_claude_max_20x',
+      })
       const box = yield* serve({ live: backup, accounts: [main, backup] })
       box.usage.set('main', 'rate-limited')
       box.usage.set('backup', { fiveHour: 42.4, sevenDay: 7 })
@@ -72,6 +74,7 @@ layer(NodeServices.layer)('the account commands', (it) => {
                 email: 'main@example.com',
                 main: true,
                 active: false,
+                plan: 'pro',
                 usage: null,
                 failure: {
                   message:
@@ -84,6 +87,7 @@ layer(NodeServices.layer)('the account commands', (it) => {
                 email: 'backup@example.com',
                 main: false,
                 active: true,
+                plan: 'max-20x',
                 usage: {
                   five_hour: {
                     utilization: 42.4,

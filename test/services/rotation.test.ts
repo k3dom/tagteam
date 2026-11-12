@@ -9,9 +9,11 @@ import * as Sandbox from '#test/sandbox.ts'
 
 const { at, login, start } = Sandbox
 
+const thresholds = { pro: 90, 'max-5x': 95, 'max-20x': 97 }
+
 const tick = Effect.fnUntraced(function* () {
   const rotation = yield* Rotation.Rotation.make({
-    threshold: 90,
+    thresholds,
     interval: '1 minute',
   })
   yield* rotation.tick()
@@ -57,7 +59,7 @@ layer(NodeServices.layer)('Rotation', (it) => {
       box.usage.set('main', { fiveHour: 95, resetsAt: at({ hours: 2 }) })
       box.usage.set('backup', { fiveHour: 10 })
       const rotation = yield* Rotation.Rotation.make({
-        threshold: 90,
+        thresholds,
         interval: '1 minute',
       }).pipe(Effect.provide(box.layer))
       const activeAfterTick = Effect.gen(function* () {
@@ -117,6 +119,63 @@ layer(NodeServices.layer)('Rotation', (it) => {
         deepStrictEqual(
           (yield* box.claudeCode).config['oauthAccount'],
           main.oauthAccount
+        )
+      })
+  )
+
+  it.effect.each([
+    {
+      name: 'a Pro account at 90%',
+      tier: undefined,
+      sevenDay: 90,
+      switches: true,
+    },
+    {
+      name: 'a Max 5x account at 94%',
+      tier: 'default_claude_max_5x',
+      sevenDay: 94,
+      switches: false,
+    },
+    {
+      name: 'a Max 5x account at 95%',
+      tier: 'default_claude_max_5x',
+      sevenDay: 95,
+      switches: true,
+    },
+    {
+      name: 'a Max 20x account at 96%',
+      tier: 'default_claude_max_20x',
+      sevenDay: 96,
+      switches: false,
+    },
+    {
+      name: 'a Max 20x account at 97%',
+      tier: 'default_claude_max_20x',
+      sevenDay: 97,
+      switches: true,
+    },
+  ])(
+    "applies the threshold of the active account's plan to $name",
+    ({ tier, sevenDay, switches }) =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(start.epochMilliseconds)
+        const main = login(
+          'main',
+          tier === undefined ? {} : { organizationTier: tier }
+        )
+        const backup = login('backup')
+        const box = yield* Sandbox.make({
+          live: main,
+          accounts: [main, backup],
+        })
+        box.usage.set('main', { fiveHour: 10, sevenDay })
+        box.usage.set('backup', { fiveHour: 0 })
+
+        yield* tick().pipe(Effect.provide(box.layer))
+
+        deepStrictEqual(
+          (yield* box.claudeCode).config['oauthAccount'],
+          (switches ? backup : main).oauthAccount
         )
       })
   )
@@ -209,7 +268,7 @@ layer(NodeServices.layer)('Rotation', (it) => {
       box.usage.set('main', { fiveHour: 39, sevenDay: 90 })
       box.usage.set('backup', { fiveHour: 100, resetsAt: at({ hours: 1 }) })
       const rotation = yield* Rotation.Rotation.make({
-        threshold: 90,
+        thresholds,
         interval: '1 minute',
       }).pipe(Effect.provide(box.layer))
       const activeAfterTick = Effect.gen(function* () {

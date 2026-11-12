@@ -5,7 +5,17 @@ self: {
   ...
 }: let
   cfg = config.services.tagteam;
+  threshold = plan: default:
+    lib.mkOption {
+      type = lib.types.ints.between 1 100;
+      inherit default;
+      description = "Percentage of its 5-hour or weekly limit at which tagteam switches away from a ${plan} account.";
+    };
 in {
+  imports = [
+    (lib.mkRemovedOptionModule ["services" "tagteam" "threshold"] "Set services.tagteam.thresholds.pro, .max5x and .max20x instead.")
+  ];
+
   options.services.tagteam = {
     enable = lib.mkEnableOption "tagteam, which rotates Claude Code between your accounts as they near their rate limits";
 
@@ -16,10 +26,10 @@ in {
       description = "The tagteam package to use.";
     };
 
-    threshold = lib.mkOption {
-      type = lib.types.ints.between 1 100;
-      default = 90;
-      description = "Percentage of its 5-hour or weekly limit at which tagteam switches away from an account.";
+    thresholds = {
+      pro = threshold "Pro" 90;
+      max5x = threshold "Max 5x" 95;
+      max20x = threshold "Max 20x" 97;
     };
 
     interval = lib.mkOption {
@@ -71,8 +81,12 @@ in {
         ExecStart = lib.escapeShellArgs [
           (lib.getExe cfg.package)
           "daemon"
-          "--threshold"
-          cfg.threshold
+          "--threshold-pro"
+          cfg.thresholds.pro
+          "--threshold-max-5x"
+          cfg.thresholds.max5x
+          "--threshold-max-20x"
+          cfg.thresholds.max20x
           "--interval"
           cfg.interval
         ];

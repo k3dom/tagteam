@@ -13,14 +13,14 @@ import {
 } from 'effect'
 
 import * as Login from '#/domain/login.ts'
+import * as Plan from '#/domain/plan.ts'
 import * as Policy from '#/domain/policy.ts'
 import * as ClaudeCode from '#/lib/claude-code.ts'
 import * as Accounts from '#/services/accounts.ts'
 import * as UsageCache from '#/services/usage-cache.ts'
 
 export interface Settings {
-  /** Percentage of a limit at which tagteam switches away from an account. */
-  readonly threshold: number
+  readonly thresholds: Plan.Thresholds
   readonly interval: Duration.Input
 }
 
@@ -62,25 +62,26 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
         managed,
         Effect.fnUntraced(function* (login) {
           const active = Login.sameAccount(login, live.value)
-          const check = yield* usageCache.get(active ? live.value : login, {
-            active,
-          })
+          const current = active ? live.value : login
+          const check = yield* usageCache.get(current, { active })
           return {
             login,
             active,
             usage: Option.map(check.latest, (latest) => latest.usage),
+            threshold: settings.thresholds[Plan.of(current)],
           }
         })
       )
       const now = yield* DateTime.now
       const limit = pipe(
         Array.findFirst(candidates, ({ active }) => active),
-        Option.flatMap(({ usage }) => usage),
-        Option.flatMap((usage) =>
-          Policy.exhausted(usage, settings.threshold, now)
+        Option.flatMap(({ usage, threshold }) =>
+          Option.flatMap(usage, (known) =>
+            Policy.exhausted(known, threshold, now)
+          )
         )
       )
-      const target = Policy.choose(candidates, settings.threshold, now)
+      const target = Policy.choose(candidates, now)
       if (Option.isNone(target)) {
         if (Option.isSome(limit)) {
           return yield* notice(
@@ -128,7 +129,13 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
 
     const run = Effect.fn('Rotation.run')(function* () {
       yield* Effect.logInfo(
-        `Watching Claude Code's accounts, switching at ${settings.threshold}% of a limit.`
+        `Watching Claude Code's accounts, switching at this share of a limit: ${pipe(
+          Plan.Plan.literals,
+          Array.map(
+            (plan) => `${settings.thresholds[plan]}% on ${Plan.label(plan)}`
+          ),
+          Array.join(', ')
+        )}.`
       )
       return yield* tick().pipe(
         Effect.catch((error) => Effect.logWarning(error.message)),
