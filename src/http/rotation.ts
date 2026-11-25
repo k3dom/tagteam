@@ -12,7 +12,7 @@ export const layer = HttpApiBuilder.group(
     const accounts = yield* Accounts.Accounts
     const rotation = yield* Rotation.Rotation
     return handlers.handleAll({
-      mode: () => Effect.map(accounts.mode(), (mode) => ({ mode })),
+      mode: () => accounts.mode().pipe(Effect.map((mode) => ({ mode }))),
       setMode: ({ payload }) => rotation.setMode(payload.mode),
       switch: ({ payload }) => rotation.switchTo(payload.account),
     })

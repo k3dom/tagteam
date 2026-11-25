@@ -3,7 +3,7 @@
 A daemon and CLI that rotates Claude Code between several accounts. It prefers
 one main account, switches to the next account in priority order when the active
 one nears its 5-hour or weekly limit, and returns to the main account once it
-recovers.
+recovers. With automatic switching off, it switches only when told to.
 
 The daemon is a server with an HTTP API built with `effect/http-api`, served at
 a Unix socket, and the other commands are clients of it. Only the daemon reads
@@ -42,4 +42,4 @@ instead of relying on memory, and leave them unchanged.
   They show how Claude Code stores credentials, which locks it takes while
   refreshing them, and how the OAuth token and usage endpoints behave. Treat
   them as research, not as code to port: tagteam keeps only the auto-switcher
-  with a main account.
+  with a main account and switching by hand.

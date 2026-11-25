@@ -365,9 +365,8 @@ layer(NodeServices.layer)('Rotation', (it) => {
         const refreshedMain = login('main', { generation: 1 })
         yield* box.logIn(refreshedMain)
         const rotation = yield* make.pipe(Effect.provide(box.layer))
-        const active = Effect.map(
-          box.claudeCode,
-          ({ config }) => config['oauthAccount']
+        const active = box.claudeCode.pipe(
+          Effect.map(({ config }) => config['oauthAccount'])
         )
 
         deepStrictEqual(yield* rotation.switchTo('backup@example.com'), {

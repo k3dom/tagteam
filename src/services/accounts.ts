@@ -94,15 +94,6 @@ export class Accounts extends Context.Service<Accounts>()('@tagteam/Accounts', {
       )
     })
 
-    const update = Effect.fn('Accounts.update')(function* (
-      f: (accounts: ReadonlyArray<Login.Login>) => ReadonlyArray<Login.Login>
-    ) {
-      return yield* modify((state) => {
-        const next = f(state.accounts)
-        return Effect.succeed([next, { ...state, accounts: next }] as const)
-      })
-    })
-
     const add = Effect.fn('Accounts.add')(function* (options: {
       readonly main: boolean
     }) {
@@ -174,7 +165,7 @@ export class Accounts extends Context.Service<Accounts>()('@tagteam/Accounts', {
       )
     })
 
-    return { list, mode, modify, update, add, remove, makeMain }
+    return { list, mode, modify, add, remove, makeMain }
   }),
 }) {}
 

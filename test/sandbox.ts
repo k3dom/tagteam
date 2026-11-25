@@ -2,11 +2,14 @@ import { NodeServices } from '@effect/platform-node'
 import { DateTime, Effect, FileSystem, Layer, Path, Schema } from 'effect'
 import { HttpClient, HttpClientResponse } from 'effect/http'
 
+import * as Server from '#/app/server.ts'
 import type * as Login from '#/domain/login.ts'
 import type * as Mode from '#/domain/mode.ts'
+import * as Plan from '#/domain/plan.ts'
 import * as Anthropic from '#/lib/anthropic.ts'
 import * as ClaudeCode from '#/lib/claude-code.ts'
 import * as Accounts from '#/services/accounts.ts'
+import * as Rotation from '#/services/rotation.ts'
 import * as UsageCache from '#/services/usage-cache.ts'
 
 export const start = DateTime.makeUnsafe('2026-10-21T08:00:00Z')
@@ -241,4 +244,23 @@ export const make = Effect.fnUntraced(function* (options: {
       return yield* accounts.mode()
     }).pipe(Effect.provide(layer)),
   }
+})
+
+/** A sandbox whose daemon serves the API, without rotating on a schedule. */
+export const serve = Effect.fnUntraced(function* (
+  options: Parameters<typeof make>[0]
+) {
+  const box = yield* make(options)
+  yield* Layer.build(
+    Server.layer(box.socket).pipe(
+      Layer.provide(
+        Rotation.layer({
+          thresholds: Plan.defaultThresholds,
+          interval: '1 minute',
+        })
+      ),
+      Layer.provide(box.layer)
+    )
+  )
+  return box
 })

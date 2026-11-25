@@ -3,6 +3,7 @@ import { Argument, Command } from 'effect/cli'
 
 import * as Client from '#/client.ts'
 import * as Accounts from '#/commands/accounts.ts'
+import * as Mode from '#/domain/mode.ts'
 
 export const switchTo = Command.make(
   'switch',
@@ -26,7 +27,7 @@ export const switchTo = Command.make(
 export const mode = Command.make(
   'mode',
   {
-    mode: Argument.Literals('mode', ['auto', 'manual']).pipe(
+    mode: Argument.Literals('mode', Mode.Mode.literals).pipe(
       Argument.withDescription(
         'auto switches by usage, manual stays on the current account. Without it, prints the current mode.'
       ),
@@ -35,12 +36,14 @@ export const mode = Command.make(
   },
   Effect.fn('commands.mode')(function* ({ mode: chosen }) {
     const client = yield* Client.Client
-    if (Option.isSome(chosen)) {
-      yield* client.rotation.setMode({ payload: { mode: chosen.value } })
-    }
-    const current = Option.isSome(chosen)
-      ? chosen.value
-      : (yield* client.rotation.mode()).mode
+    const current = yield* Option.match(chosen, {
+      onNone: () =>
+        client.rotation.mode().pipe(Effect.map((response) => response.mode)),
+      onSome: (next) =>
+        client.rotation
+          .setMode({ payload: { mode: next } })
+          .pipe(Effect.as(next)),
+    })
     yield* Console.log(
       Match.value(current).pipe(
         Match.when(

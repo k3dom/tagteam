@@ -41,10 +41,8 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
     })
 
     /**
-     * Switches Claude Code from `live` to the stored login of `target`,
-     * provided Claude Code is still logged into `live`. The replaced login
-     * includes any token refresh Claude Code made since `live` was read.
-     * Returns the state with that login, or `None` when nothing was switched.
+     * Switches Claude Code from `live` to `target`, storing the replaced login
+     * with any token refresh Claude Code made since `live` was read.
      */
     const activate = Effect.fnUntraced(function* (
       state: Accounts.State,
@@ -76,9 +74,22 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
         )
       }
       // Claude Code refreshes the tokens of the account it uses. Keeping the
-      // stored copy in step means the account survives a /login to another.
+      // stored copy in step means the account survives a /login to another,
+      // unless a switch has stored newer tokens since this tick read them.
       if (!Equal.equals(stored.value, live.value)) {
-        yield* accounts.update((all) => Login.replace(all, live.value))
+        yield* accounts.modify((state) =>
+          Effect.succeed([
+            undefined,
+            Option.exists(Login.find(state.accounts, live.value), (current) =>
+              Equal.equals(current, stored.value)
+            )
+              ? {
+                  ...state,
+                  accounts: Login.replace(state.accounts, live.value),
+                }
+              : state,
+          ] as const)
+        )
       }
 
       const candidates = yield* Effect.forEach(
@@ -152,10 +163,6 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
       )
     })
 
-    /**
-     * Switches Claude Code to `account` and turns automatic switching off, so
-     * that Claude Code stays there.
-     */
     const switchTo = Effect.fn('Rotation.switchTo')(function* (
       account: string
     ) {
@@ -212,10 +219,6 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
       return { email: to, switched }
     })
 
-    /**
-     * Turns automatic switching on or off. Turned on, it switches right away
-     * if Claude Code should be on another account.
-     */
     const setMode = Effect.fn('Rotation.setMode')(function* (mode: Mode.Mode) {
       const previous = yield* accounts.modify((state) =>
         Effect.succeed([state.mode, { ...state, mode }] as const)
