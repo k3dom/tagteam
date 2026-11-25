@@ -12,7 +12,9 @@ import {
   Schedule,
 } from 'effect'
 
+import * as Account from '#/domain/account.ts'
 import * as Login from '#/domain/login.ts'
+import type * as Mode from '#/domain/mode.ts'
 import * as Plan from '#/domain/plan.ts'
 import * as Policy from '#/domain/policy.ts'
 import * as ClaudeCode from '#/lib/claude-code.ts'
@@ -36,6 +38,27 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
       if (!Option.contains(previous, message)) {
         yield* Effect.logWarning(message)
       }
+    })
+
+    /**
+     * Switches Claude Code from `live` to the stored login of `target`,
+     * provided Claude Code is still logged into `live`. The replaced login
+     * includes any token refresh Claude Code made since `live` was read.
+     * Returns the state with that login, or `None` when nothing was switched.
+     */
+    const activate = Effect.fnUntraced(function* (
+      state: Accounts.State,
+      target: Login.Login,
+      live: Login.Login
+    ) {
+      const replaced = yield* claude.activate(
+        Option.getOrElse(Login.find(state.accounts, target), () => target),
+        live
+      )
+      return Option.map(replaced, (outgoing): Accounts.State => ({
+        ...state,
+        accounts: Login.replace(state.accounts, outgoing),
+      }))
     })
 
     const tick = Effect.fn('Rotation.tick')(function* () {
@@ -81,6 +104,14 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
           )
         )
       )
+      if ((yield* accounts.mode()) === 'manual') {
+        if (Option.isSome(limit)) {
+          return yield* notice(
+            `${Login.email(live.value)} has used ${limit.value.window.utilization}% of its ${limit.value.name} limit, but automatic switching is off. Switch with \`tagteam switch\`, or turn it on with \`tagteam mode auto\`.`
+          )
+        }
+        return yield* Ref.set(lastNotice, Option.none())
+      }
       const target = Policy.choose(candidates, now)
       if (Option.isNone(target)) {
         if (Option.isSome(limit)) {
@@ -91,24 +122,18 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
         return yield* Ref.set(lastNotice, Option.none())
       }
 
-      // The replaced login includes any token refresh Claude Code made since
-      // this tick read it. When Claude Code is logged into another account by
-      // now, nothing is switched and the next tick looks again.
+      // When Claude Code is logged into another account by now, or automatic
+      // switching was turned off since this tick read the mode, nothing is
+      // switched and the next tick looks again.
       const switched = yield* accounts.modify(
-        Effect.fnUntraced(function* (all) {
-          const replaced = yield* claude.activate(
-            Option.getOrElse(
-              Login.find(all, target.value.login),
-              () => target.value.login
-            ),
-            live.value
-          )
+        Effect.fnUntraced(function* (state) {
+          if (state.mode === 'manual') {
+            return [false, state] as const
+          }
+          const next = yield* activate(state, target.value.login, live.value)
           return [
-            Option.isSome(replaced),
-            Option.match(replaced, {
-              onNone: () => all,
-              onSome: (outgoing) => Login.replace(all, outgoing),
-            }),
+            Option.isSome(next),
+            Option.getOrElse(next, () => state),
           ] as const
         })
       )
@@ -127,6 +152,89 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
       )
     })
 
+    /**
+     * Switches Claude Code to `account` and turns automatic switching off, so
+     * that Claude Code stays there.
+     */
+    const switchTo = Effect.fn('Rotation.switchTo')(function* (
+      account: string
+    ) {
+      const { from, to, switched } = yield* accounts
+        .modify(
+          Effect.fnUntraced(function* (state) {
+            const target = yield* Accounts.select(state.accounts, account)
+            const manual: Accounts.State = { ...state, mode: 'manual' }
+            // Claude Code can log into another account between reading its
+            // login and switching it, in which case the switch starts over.
+            for (;;) {
+              const live = yield* claude.current()
+              if (Option.isNone(live)) {
+                return yield* new Account.NotLoggedInError()
+              }
+              if (Option.isNone(Login.find(state.accounts, live.value))) {
+                return yield* new Account.UnmanagedError({
+                  email: Login.email(live.value),
+                })
+              }
+              const done = (moved: boolean, next: Accounts.State) =>
+                [
+                  {
+                    from: Login.email(live.value),
+                    to: Login.email(target),
+                    switched: moved,
+                  },
+                  next,
+                ] as const
+              if (Login.sameAccount(live.value, target)) {
+                return done(false, manual)
+              }
+              const next = yield* activate(manual, target, live.value)
+              if (Option.isSome(next)) {
+                return done(true, next.value)
+              }
+            }
+          })
+        )
+        .pipe(
+          Effect.catchTags({
+            ClaudeCodeError: ({ path }) =>
+              new Account.ClaudeCodeConfigError({ path }),
+            LockTimeoutError: ({ path }) =>
+              new Account.ClaudeCodeBusyError({ path }),
+          })
+        )
+      yield* Ref.set(lastNotice, Option.none())
+      yield* Effect.logInfo(
+        switched
+          ? `Switched Claude Code from ${from} to ${to} with \`tagteam switch\`, and turned automatic switching off.`
+          : `Turned automatic switching off with \`tagteam switch\`, so Claude Code stays on ${to}.`
+      )
+      return { email: to, switched }
+    })
+
+    /**
+     * Turns automatic switching on or off. Turned on, it switches right away
+     * if Claude Code should be on another account.
+     */
+    const setMode = Effect.fn('Rotation.setMode')(function* (mode: Mode.Mode) {
+      const previous = yield* accounts.modify((state) =>
+        Effect.succeed([state.mode, { ...state, mode }] as const)
+      )
+      if (previous === mode) {
+        return
+      }
+      yield* Ref.set(lastNotice, Option.none())
+      if (mode === 'manual') {
+        return yield* Effect.logInfo(
+          'Turned automatic switching off, so Claude Code stays on its current account.'
+        )
+      }
+      yield* Effect.logInfo('Turned automatic switching on.')
+      yield* tick().pipe(
+        Effect.catch((error) => Effect.logWarning(error.message))
+      )
+    })
+
     const run = Effect.fn('Rotation.run')(function* () {
       yield* Effect.logInfo(
         `Watching Claude Code's accounts, switching at this share of a limit: ${pipe(
@@ -137,13 +245,18 @@ export class Rotation extends Context.Service<Rotation>()('@tagteam/Rotation', {
           Array.join(', ')
         )}.`
       )
+      if ((yield* accounts.mode()) === 'manual') {
+        yield* Effect.logInfo(
+          'Automatic switching is off, so Claude Code stays on the account chosen with `tagteam switch` until `tagteam mode auto` turns it on.'
+        )
+      }
       return yield* tick().pipe(
         Effect.catch((error) => Effect.logWarning(error.message)),
         Effect.repeat(Schedule.spaced(settings.interval))
       )
     })
 
-    return { tick, run }
+    return { tick, switchTo, setMode, run }
   }),
 }) {}
 

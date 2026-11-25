@@ -3,6 +3,7 @@ import { DateTime, Effect, FileSystem, Layer, Path, Schema } from 'effect'
 import { HttpClient, HttpClientResponse } from 'effect/http'
 
 import type * as Login from '#/domain/login.ts'
+import type * as Mode from '#/domain/mode.ts'
 import * as Anthropic from '#/lib/anthropic.ts'
 import * as ClaudeCode from '#/lib/claude-code.ts'
 import * as Accounts from '#/services/accounts.ts'
@@ -145,6 +146,7 @@ const JsonObject = Schema.fromJsonString(
 export const make = Effect.fnUntraced(function* (options: {
   readonly live: Login.Login
   readonly accounts: ReadonlyArray<Login.Login>
+  readonly mode?: Mode.Mode
 }) {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
@@ -174,7 +176,10 @@ export const make = Effect.fnUntraced(function* (options: {
   yield* logIn(options.live)
   yield* fs.writeFileString(
     path.join(data, 'accounts.json'),
-    JSON.stringify({ accounts: options.accounts })
+    JSON.stringify({
+      accounts: options.accounts,
+      ...(options.mode && { mode: options.mode }),
+    })
   )
 
   const usage = new Map<string, Usage>()
@@ -230,6 +235,10 @@ export const make = Effect.fnUntraced(function* (options: {
     stored: Effect.gen(function* () {
       const accounts = yield* Accounts.Accounts
       return yield* accounts.list()
+    }).pipe(Effect.provide(layer)),
+    mode: Effect.gen(function* () {
+      const accounts = yield* Accounts.Accounts
+      return yield* accounts.mode()
     }).pipe(Effect.provide(layer)),
   }
 })

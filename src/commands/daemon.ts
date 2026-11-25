@@ -42,6 +42,6 @@ export const command = Command.make(
   })
 ).pipe(
   Command.withDescription(
-    'Watch the usage of every account, switch Claude Code to the first one in priority order that is under its limits, and serve the other commands'
+    'Watch the usage of every account, switch Claude Code to the first one in priority order that is under its limits while automatic switching is on, and serve the other commands'
   )
 )

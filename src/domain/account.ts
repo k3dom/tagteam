@@ -25,7 +25,16 @@ export class NotLoggedInError extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()('NotLoggedInError', {}, { httpApiStatus: 409 }) {
   override get message(): string {
-    return "Claude Code isn't logged in with a Claude account. Log in with /login in Claude Code, then run `tagteam add` again."
+    return "Claude Code isn't logged in with a Claude account. Log in with /login in Claude Code, then try again."
+  }
+}
+
+export class UnmanagedError extends Schema.TaggedError<
+  UnmanagedError,
+  { readonly brand: unique symbol }
+>()('UnmanagedLoginError', { email: Schema.String }, { httpApiStatus: 409 }) {
+  override get message(): string {
+    return `Claude Code is logged into ${this.email}, which tagteam doesn't manage, so switching would lose its login. Run \`tagteam add\` to add it, then switch again.`
   }
 }
 
@@ -48,5 +57,14 @@ export class ClaudeCodeConfigError extends Schema.TaggedError<
 >()('ClaudeCodeConfigError', { path: Schema.String }, { httpApiStatus: 500 }) {
   override get message(): string {
     return `Couldn't read ${this.path} because it isn't valid JSON. Check the file, or log in to Claude Code again to rewrite it.`
+  }
+}
+
+export class ClaudeCodeBusyError extends Schema.TaggedError<
+  ClaudeCodeBusyError,
+  { readonly brand: unique symbol }
+>()('ClaudeCodeBusyError', { path: Schema.String }, { httpApiStatus: 503 }) {
+  override get message(): string {
+    return `Couldn't switch, since another process has held the lock ${this.path} for too long. Try again in a few seconds.`
   }
 }
