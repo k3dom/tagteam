@@ -3,6 +3,7 @@ import { Command } from 'effect/cli'
 import * as Client from '#/client.ts'
 import * as Accounts from '#/commands/accounts.ts'
 import * as Daemon from '#/commands/daemon.ts'
+import * as Rotation from '#/commands/rotation.ts'
 import PackageJson from '#package.json' with { type: 'json' }
 
 export const cli = Command.make('tagteam').pipe(
@@ -12,6 +13,8 @@ export const cli = Command.make('tagteam').pipe(
     Accounts.remove.pipe(Command.provide(Client.layer)),
     Accounts.main.pipe(Command.provide(Client.layer)),
     Accounts.list.pipe(Command.provide(Client.layer)),
+    Rotation.switchTo.pipe(Command.provide(Client.layer)),
+    Rotation.mode.pipe(Command.provide(Client.layer)),
     Daemon.command,
   ])
 )

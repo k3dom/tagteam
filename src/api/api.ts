@@ -2,10 +2,12 @@ import { Effect, Option, Path } from 'effect'
 import { HttpApi, OpenApi } from 'effect/http-api'
 
 import * as Accounts from '#/api/accounts.ts'
+import * as Rotation from '#/api/rotation.ts'
 import * as Xdg from '#/lib/xdg.ts'
 
 export class Api extends HttpApi.make('tagteam')
   .add(Accounts.Group)
+  .add(Rotation.Group)
   .annotate(
     OpenApi.Description,
     "Manage the accounts of tagteam's daemon, which rotates Claude Code between them"

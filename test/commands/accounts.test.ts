@@ -1,25 +1,15 @@
 import { NodeServices } from '@effect/platform-node'
 import { layer } from '@effect/vitest'
 import { assertSome, deepStrictEqual } from '@effect/vitest/utils'
-import { Array, Effect, Exit, Layer } from 'effect'
+import { Array, Effect, Exit } from 'effect'
 import { TestClock } from 'effect/testing'
 
-import * as Server from '#/app/server.ts'
 import * as Client from '#/client.ts'
 import * as Account from '#/domain/account.ts'
 import * as Cli from '#test/cli.ts'
 import * as Sandbox from '#test/sandbox.ts'
 
-const { login, start } = Sandbox
-
-/** A sandbox whose daemon serves the API, without rotating. */
-const serve = Effect.fnUntraced(function* (
-  options: Parameters<typeof Sandbox.make>[0]
-) {
-  const box = yield* Sandbox.make(options)
-  yield* Layer.build(Server.layer(box.socket).pipe(Layer.provide(box.layer)))
-  return box
-})
+const { login, serve, start } = Sandbox
 
 layer(NodeServices.layer)('the account commands', (it) => {
   it.effect('add the logged-in account and list it with its usage', () =>
@@ -68,6 +58,7 @@ layer(NodeServices.layer)('the account commands', (it) => {
         Array.map(listed.stdout, (line) => JSON.parse(globalThis.String(line))),
         [
           {
+            mode: 'auto',
             accounts: [
               {
                 position: 1,

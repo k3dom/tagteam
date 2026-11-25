@@ -57,33 +57,36 @@ export class UsageCache extends Context.Service<UsageCache>()(
           return login.credentials.claudeAiOauth
         }
         return yield* accounts.modify(
-          Effect.fnUntraced(function* (stored) {
-            // The rotation may have switched Claude Code to this account since
-            // `login` was read. Its tokens are then Claude Code's to refresh.
+          Effect.fnUntraced(function* (state) {
+            // Claude Code may have switched to this account since `login` was
+            // read. Its tokens are then Claude Code's to refresh.
             const live = Option.filter(yield* claude.current(), (current) =>
               Login.sameAccount(current, login)
             )
             if (Option.isSome(live)) {
-              return [live.value.credentials.claudeAiOauth, stored] as const
+              return [live.value.credentials.claudeAiOauth, state] as const
             }
             const current = Option.getOrElse(
-              Login.find(stored, login),
+              Login.find(state.accounts, login),
               () => login
             )
             const tokens = current.credentials.claudeAiOauth
             if (yield* isFresh(tokens)) {
-              return [tokens, stored] as const
+              return [tokens, state] as const
             }
             const refreshed = yield* anthropic.refresh(tokens)
             return [
               refreshed,
-              Login.replace(stored, {
-                ...current,
-                credentials: {
-                  ...current.credentials,
-                  claudeAiOauth: refreshed,
-                },
-              }),
+              {
+                ...state,
+                accounts: Login.replace(state.accounts, {
+                  ...current,
+                  credentials: {
+                    ...current.credentials,
+                    claudeAiOauth: refreshed,
+                  },
+                }),
+              },
             ] as const
           })
         )

@@ -1,9 +1,10 @@
 import { NodeServices } from '@effect/platform-node'
 import { layer } from '@effect/vitest'
-import { deepStrictEqual } from '@effect/vitest/utils'
-import { Effect } from 'effect'
+import { assertSome, deepStrictEqual } from '@effect/vitest/utils'
+import { Effect, Exit } from 'effect'
 import { TestClock } from 'effect/testing'
 
+import * as Account from '#/domain/account.ts'
 import * as Rotation from '#/services/rotation.ts'
 import * as Sandbox from '#test/sandbox.ts'
 
@@ -11,11 +12,10 @@ const { at, login, start } = Sandbox
 
 const thresholds = { pro: 90, 'max-5x': 95, 'max-20x': 97 }
 
+const make = Rotation.Rotation.make({ thresholds, interval: '1 minute' })
+
 const tick = Effect.fnUntraced(function* () {
-  const rotation = yield* Rotation.Rotation.make({
-    thresholds,
-    interval: '1 minute',
-  })
+  const rotation = yield* make
   yield* rotation.tick()
 })
 
@@ -324,5 +324,132 @@ layer(NodeServices.layer)('Rotation', (it) => {
           login('backup', { generation: 1 }),
         ])
       })
+  )
+
+  it.effect('leaves the active account alone in manual mode', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(start.epochMilliseconds)
+      const main = login('main')
+      const backup = login('backup')
+      const box = yield* Sandbox.make({
+        live: backup,
+        accounts: [main, backup],
+        mode: 'manual',
+      })
+      box.usage.set('main', { fiveHour: 0 })
+      box.usage.set('backup', { fiveHour: 100 })
+
+      yield* tick().pipe(Effect.provide(box.layer))
+
+      deepStrictEqual(
+        (yield* box.claudeCode).config['oauthAccount'],
+        backup.oauthAccount
+      )
+    })
+  )
+
+  it.effect(
+    'switches to the chosen account and stays there until switching is automatic again',
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(start.epochMilliseconds)
+        const main = login('main')
+        const backup = login('backup')
+        const box = yield* Sandbox.make({
+          live: main,
+          accounts: [main, backup],
+        })
+        box.usage.set('main', { fiveHour: 0 })
+        box.usage.set('backup', { fiveHour: 50 })
+        // Claude Code refreshed the main account since tagteam stored it.
+        const refreshedMain = login('main', { generation: 1 })
+        yield* box.logIn(refreshedMain)
+        const rotation = yield* make.pipe(Effect.provide(box.layer))
+        const active = box.claudeCode.pipe(
+          Effect.map(({ config }) => config['oauthAccount'])
+        )
+
+        deepStrictEqual(yield* rotation.switchTo('backup@example.com'), {
+          email: 'backup@example.com',
+          switched: true,
+        })
+        deepStrictEqual(yield* active, backup.oauthAccount)
+        deepStrictEqual(yield* box.stored, [refreshedMain, backup])
+        deepStrictEqual(yield* box.mode, 'manual')
+
+        yield* TestClock.adjust('1 minute')
+        yield* rotation.tick()
+        deepStrictEqual(yield* active, backup.oauthAccount)
+
+        yield* rotation.setMode('auto')
+        deepStrictEqual(yield* active, refreshedMain.oauthAccount)
+        deepStrictEqual(yield* box.mode, 'auto')
+      })
+  )
+
+  it.effect('stops switching once switching is turned off', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(start.epochMilliseconds)
+      const main = login('main')
+      const backup = login('backup')
+      const box = yield* Sandbox.make({ live: main, accounts: [main, backup] })
+      box.usage.set('main', { fiveHour: 95 })
+      box.usage.set('backup', { fiveHour: 10 })
+      const rotation = yield* make.pipe(Effect.provide(box.layer))
+
+      yield* rotation.setMode('manual')
+      yield* rotation.tick()
+
+      deepStrictEqual(
+        (yield* box.claudeCode).config['oauthAccount'],
+        main.oauthAccount
+      )
+    })
+  )
+
+  it.effect('keeps switching off when asked for the active account', () =>
+    Effect.gen(function* () {
+      const main = login('main')
+      const backup = login('backup')
+      const box = yield* Sandbox.make({ live: main, accounts: [main, backup] })
+      const before = yield* box.claudeCode
+      const rotation = yield* make.pipe(Effect.provide(box.layer))
+
+      deepStrictEqual(yield* rotation.switchTo('1'), {
+        email: 'main@example.com',
+        switched: false,
+      })
+      deepStrictEqual(yield* box.claudeCode, before)
+      deepStrictEqual(yield* box.mode, 'manual')
+    })
+  )
+
+  it.effect.each([
+    {
+      name: 'a login it does not manage',
+      live: login('stranger'),
+      account: '1',
+      error: new Account.UnmanagedError({ email: 'stranger@example.com' }),
+    },
+    {
+      name: 'an account it does not know',
+      live: login('main'),
+      account: '3',
+      error: new Account.NotFoundError({ account: '3' }),
+    },
+  ])('refuses to switch for $name', ({ live, account, error }) =>
+    Effect.gen(function* () {
+      const main = login('main')
+      const backup = login('backup')
+      const box = yield* Sandbox.make({ live, accounts: [main, backup] })
+      const before = yield* box.claudeCode
+      const rotation = yield* make.pipe(Effect.provide(box.layer))
+
+      const exit = yield* rotation.switchTo(account).pipe(Effect.exit)
+
+      assertSome(Exit.findErrorOption(exit), error)
+      deepStrictEqual(yield* box.claudeCode, before)
+      deepStrictEqual(yield* box.mode, 'auto')
+    })
   )
 })

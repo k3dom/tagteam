@@ -2,7 +2,8 @@
 
 Keeps Claude Code on your main account, switches to your next account when it
 nears its 5-hour or weekly limit, and switches back once the main account
-recovers. Running sessions use the new account from their next message.
+recovers. You can also switch by hand, which turns the automatic switching off.
+Running sessions use the new account from their next message.
 
 ## Usage
 
@@ -19,6 +20,9 @@ tagteam list            # accounts in priority order with their usage
 tagteam list --json     # the same as JSON, for scripts and widgets
 tagteam main 2          # make account 2 (or an email) the main account
 tagteam remove 3        # stop managing account 3
+tagteam switch 2        # switch to account 2 and turn automatic switching off
+tagteam mode            # whether automatic switching is on
+tagteam mode auto       # turn it on, or off with `manual`
 ```
 
 - The first account added is the main account. The others follow in the order
@@ -35,6 +39,11 @@ tagteam remove 3        # stop managing account 3
   the requests Anthropic allows.
 - `--threshold-pro`, `--threshold-max-5x`, `--threshold-max-20x` and
   `--interval <seconds>` change the defaults.
+- With automatic switching off, Claude Code stays on the account you switch it
+  to, and the daemon only warns when that account nears a limit. It keeps
+  checking usage for `tagteam list` and keeps the stored logins up to date. The
+  mode survives a restart, and turning automatic switching back on switches
+  right away if another account should be active.
 
 ## Nix
 
@@ -62,7 +71,8 @@ Without Nix, run `tagteam daemon` as a service of your own.
 
 `herdr/tagteam-usage/` is a mod for the [Herdr](https://herdr.dev) desktop app.
 It shows a small window with each account's 5-hour and weekly usage and when
-each limit resets, marks the active account and lists failed checks on hover.
+each limit resets, marks the active account, says when automatic switching is
+off and lists failed checks on hover.
 
 - Install it with the Home Manager option above, or copy the folder to
   `~/.config/herdr-app/mods/`.
@@ -81,8 +91,9 @@ each limit resets, marks the active account and lists failed checks on hover.
   `tagteam.sock` in the data directory where that isn't set). The other commands
   are clients of that API. The daemon reads Claude Code's login, so
   `CLAUDE_CONFIG_DIR` matters in its environment rather than the shell's.
-- **Storage:** accounts live in `$XDG_DATA_HOME/tagteam/accounts.json` (default
-  `~/.local/share/tagteam/`), readable only by you. Only the daemon writes it.
+- **Storage:** accounts and the mode live in
+  `$XDG_DATA_HOME/tagteam/accounts.json` (default `~/.local/share/tagteam/`),
+  readable only by you. Only the daemon writes it.
 - **Switching:** replaces the login in `~/.claude/.credentials.json` and
   `oauthAccount` in `~/.claude.json`. MCP server tokens and other settings stay.
   `CLAUDE_CONFIG_DIR` is respected.

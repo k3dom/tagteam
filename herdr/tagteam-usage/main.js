@@ -22,6 +22,7 @@ function roughly(ms) {
 export default class TagteamUsage extends View {
   init(_props, cx) {
     this.accounts = null
+    this.mode = null
     this.error = null
     this.busy = false
     cx.timer.every(30000, (tick) => this.refresh(tick))
@@ -40,7 +41,9 @@ export default class TagteamUsage extends View {
         this.error =
           "Couldn't run tagteam. Check that it is installed and on your PATH."
       } else if (result.code === 0) {
-        this.accounts = JSON.parse(result.stdout).accounts
+        const { mode, accounts } = JSON.parse(result.stdout)
+        this.mode = mode
+        this.accounts = accounts
         this.error = null
       } else {
         this.error =
@@ -74,9 +77,18 @@ export default class TagteamUsage extends View {
       )
     }
     const now = Date.now()
-    return root.children(
-      this.accounts.map((account) => this.row(account, now, t))
-    )
+    return root
+      .when(this.mode === 'manual', (el) =>
+        el.child(
+          div()
+            .text_color(t.muted)
+            .tooltip(
+              'Automatic switching is off. Switch with `tagteam switch`, or turn it on with `tagteam mode auto`.'
+            )
+            .child('Manual switching')
+        )
+      )
+      .children(this.accounts.map((account) => this.row(account, now, t)))
   }
 
   row(account, now, t) {

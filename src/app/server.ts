@@ -7,11 +7,14 @@ import { HttpApiBuilder } from 'effect/http-api'
 
 import * as Api from '#/api/api.ts'
 import * as AccountsHttp from '#/http/accounts.ts'
+import * as RotationHttp from '#/http/rotation.ts'
 import * as UnixSocket from '#/lib/unix-socket.ts'
 
 export const layer = (socket: string) =>
   HttpRouter.serve(
-    HttpApiBuilder.layer(Api.Api).pipe(Layer.provide(AccountsHttp.layer)),
+    HttpApiBuilder.layer(Api.Api).pipe(
+      Layer.provide(Layer.mergeAll(AccountsHttp.layer, RotationHttp.layer))
+    ),
     { disableLogger: true }
   ).pipe(
     Layer.provide(

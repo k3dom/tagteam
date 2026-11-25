@@ -11,11 +11,12 @@ import {
 import { Argument, Command, Flag } from 'effect/cli'
 
 import * as Client from '#/client.ts'
+import * as Mode from '#/domain/mode.ts'
 import * as Plan from '#/domain/plan.ts'
 import * as Usage from '#/domain/usage.ts'
 import * as Format from '#/lib/format.ts'
 
-const account = Argument.String('account').pipe(
+export const account = Argument.String('account').pipe(
   Argument.withDescription(
     'The account number from `tagteam list`, or its email'
   )
@@ -58,9 +59,11 @@ export const list = Command.make(
   Effect.fn('commands.list')(function* ({ json }) {
     const client = yield* Client.Client
     const all = yield* client.accounts.list()
+    const { mode } = yield* client.rotation.mode()
     if (json) {
       const ListJson = Schema.fromJsonString(
         Schema.Struct({
+          mode: Mode.Mode,
           accounts: Schema.Array(
             Schema.Struct({
               position: Schema.Int,
@@ -112,7 +115,9 @@ export const list = Command.make(
         })
       )
       return yield* Console.log(
-        yield* Schema.encodeEffect(ListJson)({ accounts }).pipe(Effect.orDie)
+        yield* Schema.encodeEffect(ListJson)({ mode, accounts }).pipe(
+          Effect.orDie
+        )
       )
     }
     if (Array.isReadonlyArrayEmpty(all)) {
@@ -138,6 +143,12 @@ export const list = Command.make(
       ]
     }
 
+    const header =
+      mode === 'manual'
+        ? [
+            'Automatic switching is off. Switch with `tagteam switch`, or turn it on with `tagteam mode auto`.',
+          ]
+        : []
     yield* Console.log(
       pipe(
         all,
@@ -175,6 +186,7 @@ export const list = Command.make(
             '\n'
           )
         }),
+        Array.prependAll(header),
         Array.join('\n')
       )
     )

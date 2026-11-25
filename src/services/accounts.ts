@@ -15,14 +15,25 @@ import {
 
 import * as Account from '#/domain/account.ts'
 import * as Login from '#/domain/login.ts'
+import * as Mode from '#/domain/mode.ts'
 import * as ClaudeCode from '#/lib/claude-code.ts'
 import * as JsonFile from '#/lib/json-file.ts'
 import * as Xdg from '#/lib/xdg.ts'
 
-const AccountsJson = Schema.Struct({ accounts: Schema.Array(Login.Login) })
+/**
+ * What the daemon stores: the managed accounts in priority order, the first
+ * one being the main account, and whether it switches between them by itself.
+ */
+export const State = Schema.Struct({
+  accounts: Schema.Array(Login.Login),
+  mode: Mode.Mode.pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed('auto' as const))
+  ),
+})
+export type State = typeof State.Type
 
 /** The account a user named by its number in `tagteam list` or its email. */
-const select = (
+export const select = (
   logins: ReadonlyArray<Login.Login>,
   account: string
 ): Effect.Effect<Login.Login, Account.NotFoundError> =>
@@ -37,9 +48,8 @@ const select = (
   )
 
 /**
- * The managed accounts in priority order. The first one is the main account.
- * The daemon is their only writer, so it keeps them in memory and writes
- * every change through to `accounts.json`.
+ * The daemon's stored state. The daemon is its only writer, so it keeps it in
+ * memory and writes every change through to `accounts.json`.
  */
 export class Accounts extends Context.Service<Accounts>()('@tagteam/Accounts', {
   make: Effect.fnUntraced(function* (directory: string) {
@@ -47,51 +57,41 @@ export class Accounts extends Context.Service<Accounts>()('@tagteam/Accounts', {
     const path = yield* Path.Path
     const claude = yield* ClaudeCode.ClaudeCode
     const file = path.join(directory, 'accounts.json')
-    const stored = yield* SynchronizedRef.make(
-      yield* JsonFile.read(file, AccountsJson).pipe(
+    const stored = yield* SynchronizedRef.make<State>(
+      yield* JsonFile.read(file, State).pipe(
         Effect.map(
-          Option.match({
-            onNone: (): ReadonlyArray<Login.Login> => [],
-            onSome: ({ accounts }) => accounts,
-          })
+          Option.getOrElse((): State => ({ accounts: [], mode: 'auto' }))
         ),
         Effect.orDie
       )
     )
 
     const list = Effect.fn('Accounts.list')(function* () {
-      return yield* SynchronizedRef.get(stored)
+      return (yield* SynchronizedRef.get(stored)).accounts
     })
 
-    /** Replaces the accounts with what `f` returns, one change at a time. */
+    const mode = Effect.fn('Accounts.mode')(function* () {
+      return (yield* SynchronizedRef.get(stored)).mode
+    })
+
+    /** Replaces the state with what `f` returns, one change at a time. */
     const modify = Effect.fn('Accounts.modify')(function* <A, E, R>(
-      f: (
-        accounts: ReadonlyArray<Login.Login>
-      ) => Effect.Effect<readonly [A, ReadonlyArray<Login.Login>], E, R>
+      f: (state: State) => Effect.Effect<readonly [A, State], E, R>
     ) {
       return yield* SynchronizedRef.modifyEffect(
         stored,
         Effect.fnUntraced(
-          function* (accounts) {
-            const [result, next] = yield* f(accounts)
+          function* (state) {
+            const [result, next] = yield* f(state)
             yield* fs
               .makeDirectory(directory, { recursive: true, mode: 0o700 })
               .pipe(Effect.orDie)
-            yield* JsonFile.write(file, { accounts: next }, { indent: 2 })
+            yield* JsonFile.write(file, next, { indent: 2 })
             return [result, next] as const
           },
           Effect.provideService(FileSystem.FileSystem, fs)
         )
       )
-    })
-
-    const update = Effect.fn('Accounts.update')(function* (
-      f: (accounts: ReadonlyArray<Login.Login>) => ReadonlyArray<Login.Login>
-    ) {
-      return yield* modify((accounts) => {
-        const next = f(accounts)
-        return Effect.succeed([next, next] as const)
-      })
     })
 
     const add = Effect.fn('Accounts.add')(function* (options: {
@@ -109,7 +109,8 @@ export class Accounts extends Context.Service<Accounts>()('@tagteam/Accounts', {
         return yield* new Account.NotLoggedInError()
       }
       const login = live.value
-      return yield* modify((all) => {
+      return yield* modify((state) => {
+        const all = state.accounts
         const known = Option.isSome(Login.find(all, login))
         const next = Match.value({ main: options.main, known }).pipe(
           Match.when({ main: true }, () =>
@@ -127,18 +128,18 @@ export class Accounts extends Context.Service<Accounts>()('@tagteam/Accounts', {
         )
         return Effect.succeed([
           { email: Login.email(login), position, added: !known },
-          next,
+          { ...state, accounts: next },
         ] as const)
       })
     })
 
     const remove = Effect.fn('Accounts.remove')(function* (account: string) {
       return yield* modify(
-        Effect.fnUntraced(function* (all) {
-          const login = yield* select(all, account)
+        Effect.fnUntraced(function* (state) {
+          const login = yield* select(state.accounts, account)
           return [
             { email: Login.email(login) },
-            Login.remove(all, login),
+            { ...state, accounts: Login.remove(state.accounts, login) },
           ] as const
         })
       )
@@ -148,17 +149,23 @@ export class Accounts extends Context.Service<Accounts>()('@tagteam/Accounts', {
       account: string
     ) {
       return yield* modify(
-        Effect.fnUntraced(function* (all) {
-          const login = yield* select(all, account)
+        Effect.fnUntraced(function* (state) {
+          const login = yield* select(state.accounts, account)
           return [
             { email: Login.email(login) },
-            Array.prepend(Login.remove(all, login), login),
+            {
+              ...state,
+              accounts: Array.prepend(
+                Login.remove(state.accounts, login),
+                login
+              ),
+            },
           ] as const
         })
       )
     })
 
-    return { list, modify, update, add, remove, makeMain }
+    return { list, mode, modify, add, remove, makeMain }
   }),
 }) {}
 
